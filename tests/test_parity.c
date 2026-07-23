@@ -115,6 +115,61 @@ int main(void)
     if (fi) fclose(fi);
     if (fr) fclose(fr);
 
+    /* ---- private call smoke (C1a PVT_VOICE VOICE_HEAD → DMRD with CALL_P) ---- */
+    int pvt_fails = 0;
+    ncap = 0;
+    {
+        /* First VOICE_HEAD from captures/20260720-private-ipsc2hbp-ts1.pcap */
+        static const char *pvt_hex =
+            "81000ae511296cf2b7000fa00200006e540080dd0f6407f911430000000001"
+            "40000a800a0060030000000fa06cf2b737ee0a00114971";
+        uint8_t raw[128]; int n = unhex(pvt_hex, raw);
+        translator_ipsc_voice_received(tr, raw, n, 1, 0x01);
+        if (ncap < 1) {
+            fprintf(stderr, "FAIL private: no DMRD produced from PVT_VOICE HEAD\n");
+            pvt_fails++;
+        } else {
+            const uint8_t *d = cap[0];
+            int flags = d[15];
+            unsigned dst = ((unsigned)d[8] << 16) | ((unsigned)d[9] << 8) | d[10];
+            unsigned src = ((unsigned)d[5] << 16) | ((unsigned)d[6] << 8) | d[7];
+            if (!(flags & 0x40)) {
+                fprintf(stderr, "FAIL private: DMRD flags 0x%02x missing CALL_P (0x40)\n", flags);
+                pvt_fails++;
+            }
+            if (dst != 4000 || src != 7140023u) {
+                fprintf(stderr, "FAIL private: src=%u dst=%u (want 7140023→4000)\n", src, dst);
+                pvt_fails++;
+            }
+        }
+    }
+    /* HBP private → IPSC must emit PVT_VOICE (0x81), not GROUP_VOICE */
+    ngv = 0;
+    {
+        /* Minimal private VHEAD DMRD: CALL_P|DATASYNC|VHEAD on TS1, dst=4000 src=7140023 */
+        static const char *dmrd_hex =
+            "444d524400"           /* DMRD + seq */
+            "6cf2b7"               /* src */
+            "000fa0"               /* dst 4000 */
+            "00000001"             /* rptr */
+            "61"                   /* flags: CALL_P|DATASYNC|VHEAD */
+            "aabbccdd"             /* stream */
+            "000000000000000000000000000000000000000000000000000000000000000000" /* 33 payload */
+            "0000";                /* ber/rssi — length padded below */
+        uint8_t raw[128]; int n = unhex(dmrd_hex, raw);
+        while (n < 55) raw[n++] = 0;
+        translator_hbp_voice_received(tr, raw, 55);
+        if (ngv < 1) {
+            fprintf(stderr, "FAIL private HBP→IPSC: no voice frame emitted\n");
+            pvt_fails++;
+        } else if (gvcap[0][0] != 0x81) {
+            fprintf(stderr, "FAIL private HBP→IPSC: opcode 0x%02x want PVT_VOICE 0x81\n",
+                    gvcap[0][0]);
+            pvt_fails++;
+        }
+    }
+    printf("Private smoke: %d failures\n", pvt_fails);
+
     translator_free(tr); ev_free(loop);
-    return (fails || in_fails) ? 1 : 0;
+    return (fails || in_fails || pvt_fails) ? 1 : 0;
 }

@@ -30,3 +30,4 @@ const dmr_bit DMR_SLOT_TYPE_VTERM[20] =
     {0,0,0,1,0,0,1,0,1,0,1,0,0,1,0,1,1,0,0,1}; /* 00010010101001011001 */
 
 const uint8_t DMR_LC_OPT[3] = {0x00, 0x00, 0x00};
+const uint8_t DMR_LC_OPT_UNIT[3] = {0x03, 0x00, 0x00};

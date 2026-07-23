@@ -98,5 +98,6 @@ extern const dmr_bit DMR_SLOT_TYPE_VHEAD[20]; /* VOICE_LC_HEAD slot type */
 extern const dmr_bit DMR_SLOT_TYPE_VTERM[20]; /* VOICE_LC_TERM slot type */
 
 extern const uint8_t DMR_LC_OPT[3];           /* group: 00 00 00 */
+extern const uint8_t DMR_LC_OPT_UNIT[3];      /* private/unit: 03 00 00 */
 
 #endif /* DMR_H */
