@@ -117,6 +117,82 @@ static const int EMBLC_IDX[4][32] = {
       14,30,46,62,78,94,110,126, 15,31,47,63,79,95,111,127 },
 };
 
+/* Position (0..127, pre-interleave) of each of the 72 original LC data bits,
+ * after the 5 checksum-bit inserts (at 32,43,54,65,76) and the 7 row-Hamming
+ * parity inserts (5 bits after each 11-bit group) that dmr_encode_emblc()
+ * performs — derived by simulating those exact insertions symbolically.
+ * Position 25 (data bit 20) is intentionally absent: EMBLC_IDX below never
+ * transmits it directly (recovered via checksum instead, see
+ * dmr_decode_emblc doc comment in dmr.h). */
+static const int DECODE_EMBLC_IDX[72] = {
+    0,1,2,3,4,5,6,7,8,9,10,      16,17,18,19,20,21,22,23,24,25,26,
+    32,33,34,35,36,37,38,39,40,41, 48,49,50,51,52,53,54,55,56,57,
+    64,65,66,67,68,69,70,71,72,73, 80,81,82,83,84,85,86,87,88,89,
+    96,97,98,99,100,101,102,103,104,105
+};
+
+/* Position (0..127) of the 5 checksum bits inserted by dmr_encode_emblc(),
+ * same simulation as DECODE_EMBLC_IDX above. */
+static const int EMBLC_CSUM_POS[5] = { 42, 58, 74, 90, 106 };
+
+/* Inverse of EMBLC_IDX below: for each of the 128 pre-interleave positions,
+ * which (segment, bit) transmits it. -1 at position 25 == not directly
+ * transmitted (see above; recovered via checksum in dmr_decode_emblc). */
+static const int SEG_IDX_INV_SEG[128] = {
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,-1,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+};
+static const int SEG_IDX_INV_BIT[128] = {
+    0,8,16,24, 0,8,16,24, 0,8,16,24, 0,8,16,24,
+    1,9,17,25, 1,9,17,25, 9,-1,17,25, 1,9,17,25,
+    2,10,18,26, 2,10,18,26, 2,10,18,26, 2,10,18,26,
+    3,11,19,27, 3,11,19,27, 3,11,19,27, 3,11,19,27,
+    4,12,20,28, 4,12,20,28, 4,12,20,28, 4,12,20,28,
+    5,13,21,29, 5,13,21,29, 5,13,21,29, 5,13,21,29,
+    6,14,22,30, 6,14,22,30, 6,14,22,30, 6,14,22,30,
+    7,15,23,31, 7,15,23,31, 7,15,23,31, 7,15,23,31,
+};
+
+int dmr_decode_emblc(const uint8_t frag[4][4], uint8_t lc_out[9])
+{
+    dmr_bit seg_bits[4][32];
+    for (int seg = 0; seg < 4; seg++)
+        dmr_bytes_to_bits(frag[seg], 4, seg_bits[seg]);
+
+    dmr_bit buf[128];
+    for (int pos = 0; pos < 128; pos++) {
+        int seg = SEG_IDX_INV_SEG[pos], bit = SEG_IDX_INV_BIT[pos];
+        buf[pos] = (seg < 0) ? 0 : seg_bits[seg][bit];
+    }
+
+    dmr_bit data72[72];
+    for (int i = 0; i < 72; i++)
+        data72[i] = buf[DECODE_EMBLC_IDX[i]];
+    dmr_bits_to_bytes(data72, 72, lc_out);
+
+    uint8_t want_cs = 0;
+    for (int k = 0; k < 5; k++)
+        want_cs = (uint8_t)((want_cs << 1) | buf[EMBLC_CSUM_POS[k]]);
+
+    if (dmr_csum5(lc_out) == want_cs) return 1;
+
+    /* The one data bit the encoder's own table never transmits (LC byte 2,
+     * mask 0x08) was decoded above as 0; dmr_csum5 is a simple additive sum
+     * mod 31, so the two candidate byte-2 values (bit 0 vs 1, differing by
+     * exactly 8) can never produce the same checksum mod 31 — the 5
+     * checksum bits the encoder DID send are enough to recover it exactly. */
+    lc_out[2] ^= 0x08;
+    if (dmr_csum5(lc_out) == want_cs) return 1;
+    lc_out[2] ^= 0x08;   /* restore; checksum didn't match either candidate: not a valid LC */
+    return 0;
+}
+
 void dmr_encode_emblc(const uint8_t lc[9], uint8_t out[4][4])
 {
     dmr_bit buf[160];

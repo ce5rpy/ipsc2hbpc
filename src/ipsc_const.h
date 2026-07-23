@@ -58,8 +58,16 @@
 #define GV_PAYLOAD_OFF    31
 #define GV_MIN_LEN        31
 #define GV_BE_FLAG        0x16 /* data[32] value identifying burst E (carries reassembled LC repeat) */
-#define GV_BE_LC_FLCO_OFF 56   /* FLCO of the reassembled LC repeat carried only on burst E */
-#define FLCO_GROUP        0x00 /* Group Voice Channel User (real call identity); 0x04-0x08 = TA/GPS */
+#define GV_BE_LC_FLCO_OFF 56   /* FLCO of the reassembled LC repeat carried only on burst E (9 bytes:
+                                  FLCO+FID+SVC_OPT+DST(3)+SRC(3), same layout for GVCU and TA/GPS) */
+#define GV_BE_DST_OFF     (GV_BE_LC_FLCO_OFF + 3)   /* dst field / TA text bytes 1-3 */
+#define GV_BE_SRC_OFF     (GV_BE_LC_FLCO_OFF + 6)   /* src field / TA text bytes 4-6 */
+#define FLCO_GROUP        0x00 /* Group Voice Channel User (real call identity) */
+#define FLCO_TA_HEADER    0x04 /* Talker Alias header block — byte after FID is format(2b)+length(6b) */
+#define FLCO_TA_BLOCK1    0x05 /* Talker Alias text block 1 */
+#define FLCO_TA_BLOCK2    0x06 /* Talker Alias text block 2 */
+#define FLCO_TA_BLOCK3    0x07 /* Talker Alias text block 3 */
+                               /* 0x08 = GPS_INFO — not call identity, not yet handled */
 
 #define AUTH_DIGEST_LEN   10
 

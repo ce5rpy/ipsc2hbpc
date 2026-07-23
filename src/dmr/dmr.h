@@ -76,6 +76,21 @@ void dmr_bptc_decode_full_lc(const dmr_bit in196[196], uint8_t lc_out[9]);
  * B,C,D,E.  out[0]=burst B .. out[3]=burst E, each 4 bytes (32 bits). */
 void dmr_encode_emblc(const uint8_t lc[9], uint8_t out[4][4]);
 
+/* Decode the 9-byte LC back out of the four 32-bit embedded-LC fragments
+ * (inverse of dmr_encode_emblc). No FEC correction is performed — the data
+ * bits are picked directly, same precedent as dmr_bptc_decode_full_lc.
+ * One bit of the original 72 (LC byte 2 / SVC_OPT, bit 4 from MSB, mask
+ * 0x08) is never directly transmitted — the encoder's own bit-interleave
+ * table has a duplicate index in EMBLC_IDX row 2 that overwrites it instead
+ * (matches the Python reference exactly, not a defect introduced here) — but
+ * it is recovered anyway by checking which of its two possible values makes
+ * the reconstructed LC's checksum (dmr_csum5) match the 5 checksum bits the
+ * encoder did send.
+ * Returns 1 on a checksum match (lc_out is the full, correct 9-byte LC), 0
+ * if neither candidate matches (garbled/incomplete superframe — caller
+ * should not trust lc_out). */
+int dmr_decode_emblc(const uint8_t frag[4][4], uint8_t lc_out[9]);
+
 /* ------------------------------------------------------------------ */
 /* AMBE 49<->72 bit conversion — ambe_utils.py                         */
 /* ------------------------------------------------------------------ */

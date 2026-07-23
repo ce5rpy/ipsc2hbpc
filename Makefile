@@ -88,13 +88,23 @@ TEST_SUPPORT := $(SRC_DIR)/config.c $(SRC_DIR)/toml.c $(SRC_DIR)/log.c \
 	$(SRC_DIR)/eventloop.c $(SRC_DIR)/translate.c $(DMR_SOURCES)
 
 # Tests:
-#  - test_dsp:    dmr module vs golden vectors generated from dmr_utils3
-#  - test_parity: C translator output vs Python translator output, byte-for-byte
-test: tests/test_dsp.c tests/test_parity.c $(TEST_SUPPORT)
+#  - test_dsp:           dmr module vs golden vectors generated from dmr_utils3
+#  - test_parity:          C translator output vs Python translator output, byte-for-byte
+#  - test_talker_alias:    IPSC->HBP Talker Alias burst-E relay (synthetic frames)
+#  - test_talker_alias_hbp: HBP->IPSC Talker Alias burst-E relay (synthetic frames)
+#  - test_emblc_roundtrip: dmr_decode_emblc() vs dmr_encode_emblc() (no external reference
+#                           for the decode direction, so this is the available rigor)
+test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c $(TEST_SUPPORT)
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/ipsc2hbpc_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_parity tests/test_parity.c $(TEST_SUPPORT)
 	/tmp/ipsc2hbpc_test_parity
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_ta tests/test_talker_alias.c $(TEST_SUPPORT)
+	/tmp/ipsc2hbpc_test_ta
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_ta_hbp tests/test_talker_alias_hbp.c $(TEST_SUPPORT)
+	/tmp/ipsc2hbpc_test_ta_hbp
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_emblc tests/test_emblc_roundtrip.c $(DMR_SOURCES)
+	/tmp/ipsc2hbpc_test_emblc
 
 clean:
 	rm -f $(OBJECTS) $(BIN)
