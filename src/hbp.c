@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define LOGN "hbp.protocol"
 
@@ -152,6 +153,18 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
     hbp *hb = ud;
     uint8_t buf[1024];
     int n = (int)recv(fd, buf, sizeof buf, 0);
+    if (n < 0) {
+        /* Connected-UDP socket error (e.g. ECONNREFUSED from an ICMP port-
+         * unreachable when the master goes down) — matches the Python
+         * reference's error_received: treat as an immediate disconnect
+         * instead of waiting out the ping/pong watchdog. */
+        LOGW(LOGN, "HBP: socket error (%s) — disconnecting", strerror(errno));
+        if (hb->state != ST_DISCONNECTED) {
+            if (hb->state == ST_CONNECTED) translator_hbp_disconnected(hb->tr);
+            disconnect(hb, 0);
+        }
+        return;
+    }
     if (n < 4) return;
     log_wire("hbp.wire", "HBP RECV %s %d %s", hb->cfg->hbp_master_ip, n, log_hex(buf, n));
 
