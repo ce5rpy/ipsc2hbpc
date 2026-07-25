@@ -1,15 +1,32 @@
-/* test_talker_alias.c — Talker Alias burst-E relay (IPSC -> HBP).
+/* test_talker_alias.c — Talker Alias relay (IPSC -> HBP), all four embedded-LC
+ * positions (B/C/D/E).
  *
- * Feeds a synthetic call (VOICE_HEAD + 4 filler bursts + one burst-E carrying
- * a fabricated Talker Alias header block) through the C translator and checks:
+ * Real captures (2026-07-23, non-audio protocol bytes only — no voice payload
+ * used) confirmed IPSC only ever reveals the current superframe's full 9-byte
+ * LC once, on the burst-E frame; B/C/D carry no LC information of their own
+ * over IPSC, just AMBE — this is a fixed, deterministic pattern (52,57,57,57,
+ * 66,57-byte frame cycle) across group/private calls alike, not a firmware
+ * quirk. So B/C/D of a TA superframe are built and HELD (not sent) until E
+ * arrives and resolves whether this superframe is TA; only then are all four
+ * flushed with a self-consistent embedded LC — otherwise a real receiver
+ * reconstructing bursts B/C/D/E together gets 3 fragments of the old call LC
+ * plus 1 of the TA LC, fails the checksum, and silently drops it (audio is
+ * unaffected since it travels on a separate channel — this is why group calls
+ * "worked" while Talker Alias never displayed).
  *
- *   1. The outgoing EMB (burst-E, superframe position 4) carries the TA LC —
- *      dmr_encode_emblc() of the 9-byte TA LC, spliced the same way
- *      build_embed() does (DMR_EMB[3] sync nibbles around the 32-bit fragment).
+ * Feeds a synthetic call (VOICE_HEAD + sync filler + B/C/D as plain audio,
+ * matching real IPSC — no TA marker on those — + E carrying a fabricated TA
+ * header block) through the C translator and checks:
+ *
+ *   1. B, C, D and E of the DMRD stream given the CALL's own identity match
+ *      dmr_encode_emblc() of the 9-byte TA LC — B/C/D/E are all reflown from
+ *      IPSC's single burst-E revelation, spliced the same way build_embed()
+ *      does (DMR_EMB[idx] sync nibbles around the 32-bit fragment for that
+ *      position).
  *   2. The call identity (src/dst in the DMRD header) is UNCHANGED — still
  *      the call's own src/dst, not the TA alias bytes. This is the property
  *      translate.c commit ae6a7b2 already protects; this test additionally
- *      proves the new TA relay code path does not regress it.
+ *      proves the buffered TA relay code path does not regress it.
  *
  * All frame bytes are fabricated (arbitrary ids matching the style already
  * used by tests/parity_in.txt; no captured wire data / audio of any kind). */
@@ -69,15 +86,17 @@ static int build_frame(uint8_t *out, int burst_type, int seq, const char *ta_tex
     return 66;
 }
 
-/* Bit-splice identical to translate.c's static build_embed() for pos==4
- * (idx=3, "BURST_E"): DMR_EMB[3][0:8] + 32-bit fragment + DMR_EMB[3][8:16]. */
-static void expected_burst_e_embed(const uint8_t ta_lc[9], dmr_bit out[48])
+/* Bit-splice identical to translate.c's static build_embed() for a given
+ * superframe position pos (1..4 = burst B..E, idx = pos-1): DMR_EMB[idx][0:8]
+ * + 32-bit fragment for that position + DMR_EMB[idx][8:16]. */
+static void expected_embed(const uint8_t ta_lc[9], int pos, dmr_bit out[48])
 {
     uint8_t frag[4][4];
     dmr_encode_emblc(ta_lc, frag);
-    memcpy(out, DMR_EMB[3], 8);
-    dmr_bytes_to_bits(frag[3], 4, out + 8);
-    memcpy(out + 40, DMR_EMB[3] + 8, 8);
+    int idx = pos - 1;
+    memcpy(out, DMR_EMB[idx], 8);
+    dmr_bytes_to_bits(frag[idx], 4, out + 8);
+    memcpy(out + 40, DMR_EMB[idx] + 8, 8);
 }
 
 int main(void)
@@ -109,29 +128,35 @@ int main(void)
     int fails = 0;
 
     if (ncap != 6) {
-        fprintf(stderr, "FAIL: expected 6 DMRD frames (HEAD + 4 filler + TA), got %d\n", ncap);
+        fprintf(stderr, "FAIL: expected 6 DMRD frames (HEAD + sync filler + B/C/D/E), got %d\n", ncap);
         fails++;
     } else {
-        /* DMRD frame index 5 = the TA burst-E frame (0=HEAD,1-4=filler,5=TA). */
-        const uint8_t *dmrd = cap[5];
-        int dlen = caplen[5];
+        /* DMRD frame index 1 = position A (sync, no embedded-LC, no check);
+         * 2..5 = B,C,D,E — cap[pos+1] for pos in 1..4. */
+        for (int pos = 1; pos <= 4; pos++) {
+            const uint8_t *dmrd = cap[pos + 1];
+            int dlen = caplen[pos + 1];
 
-        /* 1. Call identity unchanged: DMRD src (bytes 5:8) / dst (bytes 8:11)
-         * must still be the call's own TEST_SRC/TEST_DST — NOT the TA text
-         * bytes (which would decode to something else entirely). */
-        unsigned dmrd_src = (unsigned)(dmrd[5]<<16 | dmrd[6]<<8 | dmrd[7]);
-        unsigned dmrd_dst = (unsigned)(dmrd[8]<<16 | dmrd[9]<<8 | dmrd[10]);
-        if (dmrd_src != (unsigned)TEST_SRC || dmrd_dst != (unsigned)TEST_DST) {
-            fprintf(stderr, "FAIL: TA frame corrupted call identity: src=%u dst=%u (want %u/%u)\n",
-                    dmrd_src, dmrd_dst, (unsigned)TEST_SRC, (unsigned)TEST_DST);
-            fails++;
-        }
+            /* 1. Call identity unchanged: DMRD src (bytes 5:8) / dst (bytes
+             * 8:11) must still be the call's own TEST_SRC/TEST_DST — NOT the
+             * TA text bytes (which would decode to something else entirely). */
+            unsigned dmrd_src = (unsigned)(dmrd[5]<<16 | dmrd[6]<<8 | dmrd[7]);
+            unsigned dmrd_dst = (unsigned)(dmrd[8]<<16 | dmrd[9]<<8 | dmrd[10]);
+            if (dmrd_src != (unsigned)TEST_SRC || dmrd_dst != (unsigned)TEST_DST) {
+                fprintf(stderr, "FAIL: pos=%d corrupted call identity: src=%u dst=%u (want %u/%u)\n",
+                        pos, dmrd_src, dmrd_dst, (unsigned)TEST_SRC, (unsigned)TEST_DST);
+                fails++;
+                continue;
+            }
 
-        /* 2. Burst-E EMB carries the TA LC, not the call's own GVCU LC. */
-        if (dlen < 20 + 33) {
-            fprintf(stderr, "FAIL: DMRD frame too short (%d bytes)\n", dlen);
-            fails++;
-        } else {
+            /* 2. This position's EMB carries ITS OWN fragment of the TA LC —
+             * proving B/C/D were reflown once E revealed the TA LC, not left
+             * on the call's own GVCU LC fragment. */
+            if (dlen < 20 + 33) {
+                fprintf(stderr, "FAIL: pos=%d DMRD frame too short (%d bytes)\n", pos, dlen);
+                fails++;
+                continue;
+            }
             const uint8_t *payload_33 = dmrd + 20;
             dmr_bit full_bits[264];
             dmr_bytes_to_bits(payload_33, 33, full_bits);
@@ -139,10 +164,10 @@ int main(void)
             memcpy(got_embed, full_bits + 108, 48);   /* 72 + 36 = 108 */
 
             dmr_bit want_embed[48];
-            expected_burst_e_embed(ta_lc, want_embed);
+            expected_embed(ta_lc, pos, want_embed);
 
             if (memcmp(got_embed, want_embed, sizeof want_embed) != 0) {
-                fprintf(stderr, "FAIL: burst-E EMB does not match reinjected Talker Alias LC\n");
+                fprintf(stderr, "FAIL: pos=%d EMB does not match reinjected Talker Alias LC fragment\n", pos);
                 fprintf(stderr, "  got:  "); for (int i=0;i<48;i++) fprintf(stderr,"%d",got_embed[i]); fprintf(stderr,"\n");
                 fprintf(stderr, "  want: "); for (int i=0;i<48;i++) fprintf(stderr,"%d",want_embed[i]); fprintf(stderr,"\n");
                 fails++;
