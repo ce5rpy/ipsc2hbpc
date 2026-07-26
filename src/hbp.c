@@ -29,6 +29,15 @@ struct hbp {
     uint8_t            radio_id[4];
     ev_timer          *ping_timer;
     ev_timer          *reconnect_timer;
+
+    /* GATEWAY role: same RPTL/RPTK/RPTC/RPTO/RPTPING handshake as CLIENT (see
+     * config.c: gateway_ip/gateway_port are aliased onto hbp_master_ip/port at
+     * load time) — DMRGateway's own local-repeater link (CMMDVMNetwork) speaks
+     * this exact handshake, it just never validates the RPTK digest. The only
+     * real difference is the socket: DMRGateway filters incoming packets by
+     * exact source IP *and port*, so our local port must be a fixed bind_ip/
+     * bind_port instead of an ephemeral one — see hbp_connect(). */
+    int                is_gateway;
 };
 
 static void hbp_connect(hbp *hb);
@@ -219,7 +228,10 @@ static void disconnect(hbp *hb, int send_rptcl)
 
 static void hbp_connect(hbp *hb)
 {
-    hb->fd = udp_connect(hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
+    hb->fd = hb->is_gateway
+        ? udp_bind_connect(hb->cfg->hbp_bind_ip, hb->cfg->hbp_bind_port,
+                           hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port)
+        : udp_connect(hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
     if (hb->fd < 0) {
         LOGE(LOGN, "HBP: connect failed");
         if (hb->active) schedule_reconnect(hb);
@@ -227,7 +239,11 @@ static void hbp_connect(hbp *hb)
     }
     ev_add_fd(hb->loop, hb->fd, recv_cb, hb);
     hb->state = ST_LOGIN;
-    LOGI(LOGN, "HBP: UDP endpoint created -> %s:%d", hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
+    if (hb->is_gateway)
+        LOGI(LOGN, "HBP: UDP endpoint bound %s:%d -> %s:%d", hb->cfg->hbp_bind_ip, hb->cfg->hbp_bind_port,
+             hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
+    else
+        LOGI(LOGN, "HBP: UDP endpoint created -> %s:%d", hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
     uint8_t pkt[4 + 4];
     memcpy(pkt, "RPTL", 4);
     memcpy(pkt + 4, hb->radio_id, 4);
@@ -242,6 +258,7 @@ hbp *hbp_new(const Config *cfg, struct translator *tr, ev_loop *loop)
     hbp *hb = calloc(1, sizeof *hb);
     hb->cfg = cfg; hb->tr = tr; hb->loop = loop; hb->fd = -1;
     hb->state = ST_DISCONNECTED;
+    hb->is_gateway = !strcmp(cfg->hbp_role, "GATEWAY");
     hb->radio_id[0] = (uint8_t)(cfg->hbp_repeater_id >> 24);
     hb->radio_id[1] = (uint8_t)(cfg->hbp_repeater_id >> 16);
     hb->radio_id[2] = (uint8_t)(cfg->hbp_repeater_id >> 8);
@@ -259,7 +276,7 @@ void hbp_activate(hbp *hb)
 {
     if (hb->active) return;
     hb->active = 1;
-    LOGI(LOGN, "HBP client activated");
+    LOGI(LOGN, hb->is_gateway ? "HBP gateway activated" : "HBP client activated");
     hbp_connect(hb);
 }
 
@@ -267,7 +284,7 @@ void hbp_deactivate(hbp *hb)
 {
     if (!hb->active) return;
     hb->active = 0;
-    LOGI(LOGN, "HBP client deactivated");
+    LOGI(LOGN, hb->is_gateway ? "HBP gateway deactivated" : "HBP client deactivated");
     disconnect(hb, 1);
 }
 

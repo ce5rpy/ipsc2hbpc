@@ -16,6 +16,11 @@ int udp_socket(void);
  * literal; resolved via getaddrinfo).  Use send()/recv() afterward. -1 on err. */
 int udp_connect(const char *host, int port);
 
+/* Like udp_connect(), but the local socket is first bound to bind_ip:bind_port
+ * instead of an ephemeral port — needed when the remote peer filters incoming
+ * packets by exact source port (e.g. DMRGateway's RptAddress/RptPort). -1 on err. */
+int udp_bind_connect(const char *bind_ip, int bind_port, const char *host, int port);
+
 /* Send to ip:port from fd. Returns bytes sent or -1. */
 int udp_sendto(int fd, const void *buf, size_t len, const char *ip, int port);
 

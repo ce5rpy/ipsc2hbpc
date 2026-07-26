@@ -257,14 +257,43 @@ int config_load(const char *path, Config *cfg, char *err, size_t errlen)
     }
 
     /* [hbp] */
-    get_str(t, &e, "hbp", "master_ip", 1, "", cfg->hbp_master_ip, sizeof cfg->hbp_master_ip);
-    cfg->hbp_master_port = (int)get_int(t, &e, "hbp", "master_port", 1, 0, 1, 1, 1, 65535);
+    { static const char *HR[] = {"CLIENT","GATEWAY"};
+      get_choice(t, &e, "hbp", "role", 0, "CLIENT", HR, 2, cfg->hbp_role, sizeof cfg->hbp_role); }
+    int hbp_is_gateway = !strcmp(cfg->hbp_role, "GATEWAY");
+
+    if (hbp_is_gateway) {
+        /* DMRGateway's local-repeater link (CMMDVMNetwork) speaks the exact same
+         * RPTL/RPTK/RPTC/RPTO/RPTPING handshake as a real HBP master — it just
+         * never validates the RPTK digest. bind_ip/bind_port is our fixed local
+         * port (must match DMRGateway's [General] RptAddress/RptPort — it filters
+         * incoming packets by exact source IP+port); gateway_ip/gateway_port is
+         * where we send (must match DMRGateway's LocalAddress/LocalPort).
+         * Internally reuse master_ip/master_port as the handshake target so
+         * hbp.c needs no separate protocol implementation. */
+        get_str(t, &e, "hbp", "bind_ip",      1, "", cfg->hbp_bind_ip,    sizeof cfg->hbp_bind_ip);
+        cfg->hbp_bind_port    = (int)get_int(t, &e, "hbp", "bind_port",    1, 0, 1, 1, 1, 65535);
+        get_str(t, &e, "hbp", "gateway_ip",   1, "", cfg->hbp_gateway_ip, sizeof cfg->hbp_gateway_ip);
+        cfg->hbp_gateway_port = (int)get_int(t, &e, "hbp", "gateway_port", 1, 0, 1, 1, 1, 65535);
+        snprintf(cfg->hbp_master_ip, sizeof cfg->hbp_master_ip, "%s", cfg->hbp_gateway_ip);
+        cfg->hbp_master_port = cfg->hbp_gateway_port;
+    } else {
+        get_str(t, &e, "hbp", "master_ip", 1, "", cfg->hbp_master_ip, sizeof cfg->hbp_master_ip);
+        cfg->hbp_master_port = (int)get_int(t, &e, "hbp", "master_port", 1, 0, 1, 1, 1, 65535);
+        cfg->hbp_bind_ip[0] = 0;
+        cfg->hbp_bind_port = 0;
+        cfg->hbp_gateway_ip[0] = 0;
+        cfg->hbp_gateway_port = 0;
+    }
+
+    /* hbp_mode applies to both roles: TRACKING = only up while an IPSC peer is
+     * registered (hbp_activate/hbp_deactivate); PERSISTENT = up from startup. */
     { static const char *HM[] = {"TRACKING","PERSISTENT"};
       get_choice(t, &e, "hbp", "hbp_mode", 1, "TRACKING", HM, 2, cfg->hbp_mode, sizeof cfg->hbp_mode); }
+
     cfg->hbp_repeater_id = (uint32_t)get_int(t, &e, "hbp", "hbp_repeater_id", 1, 0, 1, 1, 0, 0);
     cfg->jitter_buffer_depth = (int)get_int(t, &e, "hbp", "jitter_buffer_depth", 0, 2, 1, 1, 1, 8);
 
-    { char pp[256]; get_str(t, &e, "hbp", "passphrase", 1, "", pp, sizeof pp);
+    { char pp[256]; get_str(t, &e, "hbp", "passphrase", !hbp_is_gateway, "", pp, sizeof pp);
       cfg->hbp_passphrase_len = (int)strlen(pp);
       memcpy(cfg->hbp_passphrase, pp, (size_t)cfg->hbp_passphrase_len); }
 

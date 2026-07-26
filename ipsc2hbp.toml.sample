@@ -176,24 +176,56 @@ use_safe_defaults = true
 # ipsc_version = "04020401"
 
 [hbp]
-# Upstream HBP master to connect to (BrandMeister, DMR+, FreeDMR, HBlink4).
+# HBP role:
+# "CLIENT" (default): ipsc2hbp connects out to an upstream HBP master
+#             (BrandMeister, DMR+, FreeDMR, HBlink4) — see master_ip/
+#             master_port/passphrase/hbp_mode below.
+# "GATEWAY":  ipsc2hbp instead logs into a locally running DMRGateway's
+#             own repeater-facing link ([General] RptAddress/RptPort/
+#             LocalAddress/LocalPort in DMRGateway.ini), so DMRGateway
+#             owns the actual upstream network connection(s) and
+#             TG-routing rules; ipsc2hbp just bridges IPSC<->DMRGateway.
+#             This is the SAME RPTL/RPTK/RPTC/RPTO/RPTPING handshake as
+#             role="CLIENT" — DMRGateway's local link just never
+#             validates the RPTK digest — except the local socket binds
+#             to a fixed bind_ip/bind_port instead of an ephemeral one,
+#             because DMRGateway filters incoming packets by exact
+#             source IP *and port*. master_ip/master_port are ignored
+#             (gateway_ip/gateway_port are used instead); passphrase/the
+#             RPTC announcement fields below are still sent but not
+#             checked by DMRGateway. hbp_mode still applies (see below).
+role = "CLIENT"
+
+# Upstream HBP master to connect to. Only used when role = "CLIENT".
 master_ip   = "127.0.0.1"
 master_port = 62031
+
+# --- role = "GATEWAY" only ---
+# bind_ip/bind_port: our fixed local port — must match DMRGateway's
+# [General] RptAddress/RptPort.
+# gateway_ip/gateway_port: where we send the login/RPTPING/DMRD — must
+# match DMRGateway's [General] LocalAddress/LocalPort.
+# bind_ip      = "127.0.0.1"
+# bind_port    = 64032
+# gateway_ip   = "127.0.0.1"
+# gateway_port = 64031
 
 # HBP repeater ID sent in all HBP packets.  Required — must be non-zero.
 # Typically the radio ID of the primary repeater, or a unique ID for this system.
 hbp_repeater_id = 3120000
 
-# Passphrase for the HBP master (must match the master's configuration).
+# Passphrase used to compute the RPTK digest. Required for role = "CLIENT"
+# (must match the master's configuration); optional and unchecked for
+# role = "GATEWAY" (DMRGateway's local link never validates it).
 passphrase = "passw0rd"
 
-# HBP connection mode:
-# "TRACKING":   Connect HBP only while an IPSC peer is registered.
+# HBP connection mode (applies to both roles):
+# "TRACKING":   Connect/listen only while an IPSC peer is registered.
 #               Disconnect when the repeater goes away. Recommended.
-# "PERSISTENT": Keep the HBP connection up regardless of repeater state.
-#               Useful to keep the system visible on network dashboards.
-#               Requires hbp_repeater_id to be non-zero — the HBP connection
-#               is established at startup, before any repeater registers.
+# "PERSISTENT": Keep the HBP connection (or, for role = "GATEWAY", the
+#               listening socket) up regardless of repeater state. Useful
+#               to keep the system visible on network dashboards, or to
+#               let DMRGateway see the link before the repeater keys up.
 hbp_mode = "TRACKING"
 
 # HBP->IPSC jitter buffer depth, in 60 ms TDMA slots (default 2 = 120 ms).

@@ -1,0 +1,22 @@
+# Config fixture for test_hbp_gateway.c — role=GATEWAY. Reuses the real HBP
+# CLIENT handshake (RPTL/RPTK/RPTC/RPTO/RPTPING) bound to a fixed local port,
+# matching DMRGateway's local-repeater link (CMMDVMNetwork).
+[global]
+log_level = "WARNING"
+[ipsc]
+mode = "MASTER"
+bind_ip = "127.0.0.1"
+bind_port = 50020
+ipsc_master_id = 9999999
+auth_enabled = false
+keepalive_watchdog = 60
+[ipsc.capabilities]
+use_safe_defaults = true
+[hbp]
+role = "GATEWAY"
+bind_ip = "127.0.0.1"
+bind_port = 64132
+gateway_ip = "127.0.0.1"
+gateway_port = 64131
+hbp_repeater_id = 3120000
+hbp_mode = "PERSISTENT"
