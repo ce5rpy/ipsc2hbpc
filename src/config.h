@@ -39,12 +39,17 @@ typedef struct {
     int      keepalive_missed_max;
 
     /* [hbp] */
-    char     hbp_master_ip[256];
-    int      hbp_master_port;
+    char     hbp_role[8];           /* "CLIENT" | "GATEWAY" */
+    char     hbp_master_ip[256];    /* CLIENT role only */
+    int      hbp_master_port;       /* CLIENT role only */
+    char     hbp_bind_ip[64];       /* GATEWAY role only */
+    int      hbp_bind_port;         /* GATEWAY role only */
+    char     hbp_gateway_ip[64];    /* GATEWAY role only */
+    int      hbp_gateway_port;      /* GATEWAY role only */
     uint32_t hbp_repeater_id;
     char     hbp_passphrase[256];
     int      hbp_passphrase_len;
-    char     hbp_mode[16];          /* "TRACKING" | "PERSISTENT" */
+    char     hbp_mode[16];          /* "TRACKING" | "PERSISTENT" — CLIENT role only */
     int      jitter_buffer_depth;   /* HBP->IPSC delivery delay in 60 ms slots */
 
     /* RPTC announcement fields */

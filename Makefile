@@ -87,6 +87,10 @@ $(BIN): $(OBJECTS)
 TEST_SUPPORT := $(SRC_DIR)/config.c $(SRC_DIR)/toml.c $(SRC_DIR)/log.c \
 	$(SRC_DIR)/eventloop.c $(SRC_DIR)/translate.c $(DMR_SOURCES)
 
+# test_hbp_gateway needs the REAL hbp.c (not stubbed) plus net.c/crypto.c, since
+# it drives the HBP role=GATEWAY link over real loopback UDP sockets.
+HBP_GATEWAY_SUPPORT := $(TEST_SUPPORT) $(SRC_DIR)/hbp.c $(SRC_DIR)/net.c $(SRC_DIR)/crypto.c
+
 # Tests:
 #  - test_dsp:           dmr module vs golden vectors generated from dmr_utils3
 #  - test_parity:          C translator output vs Python translator output, byte-for-byte
@@ -94,7 +98,10 @@ TEST_SUPPORT := $(SRC_DIR)/config.c $(SRC_DIR)/toml.c $(SRC_DIR)/log.c \
 #  - test_talker_alias_hbp: HBP->IPSC Talker Alias burst-E relay (synthetic frames)
 #  - test_emblc_roundtrip: dmr_decode_emblc() vs dmr_encode_emblc() (no external reference
 #                           for the decode direction, so this is the available rigor)
-test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c $(TEST_SUPPORT)
+#  - test_hbp_gateway:     HBP role=GATEWAY (DMRGateway local-repeater link) over real
+#                           loopback UDP: RPTL from the fixed bind port, full RPTL/RPTK/
+#                           RPTC handshake, RPTCL on deactivate, DMRD relay both directions
+test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c tests/test_hbp_gateway.c $(HBP_GATEWAY_SUPPORT)
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/ipsc2hbpc_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_parity tests/test_parity.c $(TEST_SUPPORT)
@@ -105,6 +112,8 @@ test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_
 	/tmp/ipsc2hbpc_test_ta_hbp
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_emblc tests/test_emblc_roundtrip.c $(DMR_SOURCES)
 	/tmp/ipsc2hbpc_test_emblc
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_hbp_gateway tests/test_hbp_gateway.c $(HBP_GATEWAY_SUPPORT)
+	/tmp/ipsc2hbpc_test_hbp_gateway
 
 clean:
 	rm -f $(OBJECTS) $(BIN)

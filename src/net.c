@@ -33,6 +33,37 @@ int udp_connect(const char *host, int port)
     return fd;
 }
 
+int udp_bind_connect(const char *bind_ip, int bind_port, const char *host, int port)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+
+    struct sockaddr_in la;
+    memset(&la, 0, sizeof la);
+    la.sin_family = AF_INET;
+    la.sin_port = htons((uint16_t)bind_port);
+    const char *bip = (!bind_ip || !*bind_ip) ? "0.0.0.0" : bind_ip;
+    if (inet_pton(AF_INET, bip, &la.sin_addr) != 1) { close(fd); return -1; }
+    if (bind(fd, (struct sockaddr *)&la, sizeof la) < 0) { close(fd); return -1; }
+
+    char portstr[16];
+    snprintf(portstr, sizeof portstr, "%d", port);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) { close(fd); return -1; }
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
 int udp_bind(const char *ip, int port)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
