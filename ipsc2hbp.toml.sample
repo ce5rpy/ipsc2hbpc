@@ -69,6 +69,14 @@ auth_key = ""
 # Minimum: 5.  Recommended: 60.
 keepalive_watchdog = 60
 
+# Optional: path to a status file tracking IPSC repeater connect/disconnect
+# state (master mode only). One line per repeater ID ever seen —
+# connected/disconnected, ip, port, since — rewritten atomically on every
+# registration, de-registration, and keepalive-watchdog loss. Lets another
+# process check current repeater state without parsing the log.
+# Leave unset ("") to disable — the default.
+# status_file = "/var/log/repeaters.status"
+
 # Keepalive send interval (seconds) — peer mode only.
 # How often ipsc2hbp sends MASTER_ALIVE_REQ to the master.
 # 5 seconds matches the Motorola default interval.
