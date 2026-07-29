@@ -10,6 +10,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #define MAX_PEERS 14
 #define LOGN "ipsc.protocol"
@@ -35,6 +38,23 @@ typedef struct {
     int     used;
 } peer_t;
 
+/* Master role: last known connect/disconnect state per IPSC peer ID we've
+ * ever seen, for write_status_file() -- kept separate from peers[] because a
+ * disconnected peer's peers[] slot is freed immediately (see remove_peer()),
+ * but the status file should keep showing it as disconnected rather than
+ * dropping the line. Bounded and never reclaimed, so a repeater ID that
+ * churns through more than MAX_STATUS_ENTRIES distinct IDs across one run
+ * stops getting new lines (existing ones still update fine). */
+#define MAX_STATUS_ENTRIES 32
+typedef struct {
+    uint8_t pid[4];
+    char    ip[16];
+    int     port;
+    int     connected;
+    time_t  since;
+    int     used;
+} status_entry_t;
+
 struct ipsc {
     const Config      *cfg;
     struct translator *tr;
@@ -49,6 +69,7 @@ struct ipsc {
     peer_t   peers[MAX_PEERS];
     int      npeers;
     ev_timer *watchdog;
+    status_entry_t status[MAX_STATUS_ENTRIES];
 
     /* peer */
     int       state;
@@ -100,6 +121,84 @@ static int peer_count(ipsc *ip)
     int c = 0;
     for (int i = 0; i < MAX_PEERS; i++) if (ip->peers[i].used) c++;
     return c;
+}
+
+/* ---------------- status file (master) ---------------- */
+
+/* mkdir the directory component of path, best-effort (ignores EEXIST and any
+ * other failure -- if it can't be created, the fopen() below will fail once
+ * and we log that, rather than failing twice). */
+static void ensure_parent_dir(const char *path)
+{
+    char dir[256];
+    snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
+}
+
+static void write_status_file(ipsc *ip)
+{
+    if (ip->cfg->status_file[0] == '\0') return;
+
+    char tmp[280];
+    snprintf(tmp, sizeof tmp, "%s.tmp", ip->cfg->status_file);
+
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        ensure_parent_dir(ip->cfg->status_file);
+        f = fopen(tmp, "w");
+        if (!f) {
+            LOGW(LOGN, "status file: could not open %s for writing (%s)", tmp, strerror(errno));
+            return;
+        }
+    }
+
+    fprintf(f, "# timestamp           state        id       ip               port\n");
+    for (int i = 0; i < MAX_STATUS_ENTRIES; i++) {
+        if (!ip->status[i].used) continue;
+        uint32_t pid_int = (uint32_t)ip->status[i].pid[0]<<24 | (uint32_t)ip->status[i].pid[1]<<16
+                         | (uint32_t)ip->status[i].pid[2]<<8 | ip->status[i].pid[3];
+        char ts[32];
+        struct tm tmv;
+        localtime_r(&ip->status[i].since, &tmv);
+        strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tmv);
+        fprintf(f, "%-20s %-12s %-8u %-16s %d\n", ts,
+                ip->status[i].connected ? "connected" : "disconnected",
+                pid_int, ip->status[i].ip, ip->status[i].port);
+    }
+    fclose(f);
+
+    if (rename(tmp, ip->cfg->status_file) != 0)
+        LOGW(LOGN, "status file: rename %s -> %s failed (%s)", tmp, ip->cfg->status_file, strerror(errno));
+}
+
+/* Record a connect/disconnect for IPSC peer id (master role) and rewrite the
+ * status file, if configured (see [ipsc] status_file). Kept in a table
+ * separate from peers[] -- see status_entry_t. */
+static void update_status(ipsc *ip, const uint8_t pid[4], const char *host, int port, int connected)
+{
+    if (ip->cfg->status_file[0] == '\0') return;
+
+    int idx = -1;
+    for (int i = 0; i < MAX_STATUS_ENTRIES; i++)
+        if (ip->status[i].used && memcmp(ip->status[i].pid, pid, 4) == 0) { idx = i; break; }
+    if (idx < 0) {
+        for (int i = 0; i < MAX_STATUS_ENTRIES; i++)
+            if (!ip->status[i].used) { idx = i; break; }
+        if (idx < 0) return; /* table full -- existing entries still track fine */
+    }
+
+    memcpy(ip->status[idx].pid, pid, 4);
+    snprintf(ip->status[idx].ip, sizeof ip->status[idx].ip, "%s", host);
+    ip->status[idx].port = port;
+    ip->status[idx].connected = connected;
+    ip->status[idx].since = time(NULL);
+    ip->status[idx].used = 1;
+
+    write_status_file(ip);
 }
 
 static void send_peer_list(ipsc *ip, const char *host, int port)
@@ -208,6 +307,7 @@ static void master_reg_req(ipsc *ip, const uint8_t *d, int len, const char *host
     } else {
         LOGI(LOGN, "IPSC peer re-registered: id=%u  %s:%d", pid_int, host, port);
     }
+    update_status(ip, pid, host, port, 1);
 }
 
 static void master_alive_req(ipsc *ip, const uint8_t *d, int len, const char *host, int port)
@@ -249,6 +349,7 @@ static void master_de_reg_req(ipsc *ip, const uint8_t *d, int len, const char *h
     LOGI(LOGN, "IPSC peer de-registering: id=%u  %s:%d", pid_int, host, port);
     uint8_t pkt[5]; pkt[0] = DE_REG_REPLY; memcpy(pkt + 1, ip->our_id, 4);
     ipsc_send(ip, pkt, 5, host, port);
+    update_status(ip, pid, host, port, 0);
     remove_peer(ip, find_peer(ip, pid));
 }
 
@@ -322,6 +423,7 @@ static void watchdog_cb(ev_loop *loop, void *ud)
             LOGW(LOGN, "IPSC watchdog: no keepalive for %.1fs (limit %ds) — peer %u (%s:%d) lost",
                  now - ip->peers[i].last_ka, ip->cfg->keepalive_watchdog,
                  pid_int, ip->peers[i].ip, ip->peers[i].port);
+            update_status(ip, ip->peers[i].pid, ip->peers[i].ip, ip->peers[i].port, 0);
             remove_peer(ip, i);
         }
     }
