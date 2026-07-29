@@ -14,6 +14,14 @@ translator *translator_new(const Config *cfg, ev_loop *loop);
 void translator_set_protocols(translator *tr, struct ipsc *ip, struct hbp *hb);
 void translator_free(translator *tr);
 
+/* Effective HBP repeater ID: the sole connected IPSC repeater's own radio ID
+ * if exactly one is registered (master mode) and cfg->ignore_login_repeater_id
+ * is not set -- otherwise the configured hbp_repeater_id. Re-evaluated by
+ * hbp.c at each login attempt (RPTL), not live-updated mid-session: an
+ * already-connected HBP session keeps its login identity until the next
+ * reconnect. */
+uint32_t translator_repeater_id(translator *tr);
+
 /* IPSC-side callbacks */
 void translator_peer_joined(translator *tr);
 void translator_peer_lost(translator *tr);

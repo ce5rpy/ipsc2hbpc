@@ -34,6 +34,7 @@ static int     gvlen[MAXCAP];
 static int     ngv = 0;
 
 int  ipsc_has_peers(struct ipsc *ip) { (void)ip; return 1; }
+uint32_t ipsc_sole_peer_id(struct ipsc *ip) { (void)ip; return 0; }
 void ipsc_send_voice(struct ipsc *ip, const uint8_t *p, int n) {
     (void)ip;
     if (ngv < MAXCAP) { memcpy(gvcap[ngv], p, (size_t)n); gvlen[ngv] = n; ngv++; }

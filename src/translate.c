@@ -30,7 +30,6 @@ struct translator {
     ev_loop      *loop;
     struct ipsc  *ip;
     struct hbp   *hb;
-    uint8_t       repeater_id_b[4];
     uint8_t       master_id_b[4];
 
     /* outbound (IPSC -> HBP), index 1,2 */
@@ -131,6 +130,11 @@ static void arm_delivery(translator *tr, int ts)
 static void rand4(uint8_t out[4])
 {
     if (getrandom(out, 4, 0) != 4) { out[0]=rand(); out[1]=rand(); out[2]=rand(); out[3]=rand(); }
+}
+
+static void u32_be(uint32_t v, uint8_t out[4])
+{
+    out[0]=(uint8_t)(v>>24); out[1]=(uint8_t)(v>>16); out[2]=(uint8_t)(v>>8); out[3]=(uint8_t)v;
 }
 
 /* precompute 19-byte IPSC AMBE payload of three silence frames */
@@ -271,10 +275,6 @@ translator *translator_new(const Config *cfg, ev_loop *loop)
 {
     translator *tr = calloc(1, sizeof *tr);
     tr->cfg = cfg; tr->loop = loop;
-    tr->repeater_id_b[0]=(uint8_t)(cfg->hbp_repeater_id>>24);
-    tr->repeater_id_b[1]=(uint8_t)(cfg->hbp_repeater_id>>16);
-    tr->repeater_id_b[2]=(uint8_t)(cfg->hbp_repeater_id>>8);
-    tr->repeater_id_b[3]=(uint8_t)(cfg->hbp_repeater_id);
     tr->master_id_b[0]=(uint8_t)(cfg->ipsc_master_id>>24);
     tr->master_id_b[1]=(uint8_t)(cfg->ipsc_master_id>>16);
     tr->master_id_b[2]=(uint8_t)(cfg->ipsc_master_id>>8);
@@ -291,6 +291,13 @@ translator *translator_new(const Config *cfg, ev_loop *loop)
 void translator_set_protocols(translator *tr, struct ipsc *ip, struct hbp *hb)
 {
     tr->ip = ip; tr->hb = hb;
+}
+
+uint32_t translator_repeater_id(translator *tr)
+{
+    if (tr->cfg->ignore_login_repeater_id) return tr->cfg->hbp_repeater_id;
+    uint32_t sole = ipsc_sole_peer_id(tr->ip);
+    return sole ? sole : tr->cfg->hbp_repeater_id;
 }
 
 void translator_free(translator *tr)
@@ -402,7 +409,7 @@ static void emit_slot_frame(translator *tr, int ts, const dmr_bit a1_72[72],
     dmrd[p++] = seq;
     memcpy(dmrd+p, out_src, 3); p += 3;
     memcpy(dmrd+p, out_dst, 3); p += 3;
-    memcpy(dmrd+p, tr->repeater_id_b, 4); p += 4;
+    { uint8_t rid[4]; u32_be(translator_repeater_id(tr), rid); memcpy(dmrd+p, rid, 4); p += 4; }
     dmrd[p++] = (uint8_t)flags;
     memcpy(dmrd+p, tr->out_stream_id[ts], 4); p += 4;
     memcpy(dmrd+p, payload_33, 33); p += 33;
@@ -659,7 +666,7 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
     dmrd[p++] = (uint8_t)tr->out_seq;
     memcpy(dmrd+p, out_src, 3); p+=3;
     memcpy(dmrd+p, out_dst, 3); p+=3;
-    memcpy(dmrd+p, tr->repeater_id_b, 4); p+=4;
+    { uint8_t rid[4]; u32_be(translator_repeater_id(tr), rid); memcpy(dmrd+p, rid, 4); p+=4; }
     dmrd[p++] = (uint8_t)flags;
     memcpy(dmrd+p, tr->out_stream_id[ts], 4); p+=4;
     memcpy(dmrd+p, payload_33, 33); p+=33;

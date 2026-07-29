@@ -91,6 +91,11 @@ TEST_SUPPORT := $(SRC_DIR)/config.c $(SRC_DIR)/toml.c $(SRC_DIR)/log.c \
 # it drives the HBP role=GATEWAY link over real loopback UDP sockets.
 HBP_GATEWAY_SUPPORT := $(TEST_SUPPORT) $(SRC_DIR)/hbp.c $(SRC_DIR)/net.c $(SRC_DIR)/crypto.c
 
+# test_repeater_id_from_login needs the REAL ipsc.c (not stubbed) plus
+# net.c/crypto.c, since it drives real MASTER_REG_REQ registrations over
+# loopback UDP to exercise ipsc_sole_peer_id().
+IPSC_MASTER_SUPPORT := $(TEST_SUPPORT) $(SRC_DIR)/ipsc.c $(SRC_DIR)/net.c $(SRC_DIR)/crypto.c
+
 # Tests:
 #  - test_dsp:           dmr module vs golden vectors generated from dmr_utils3
 #  - test_parity:          C translator output vs Python translator output, byte-for-byte
@@ -101,7 +106,10 @@ HBP_GATEWAY_SUPPORT := $(TEST_SUPPORT) $(SRC_DIR)/hbp.c $(SRC_DIR)/net.c $(SRC_D
 #  - test_hbp_gateway:     HBP role=GATEWAY (DMRGateway local-repeater link) over real
 #                           loopback UDP: RPTL from the fixed bind port, full RPTL/RPTK/
 #                           RPTC handshake, RPTCL on deactivate, DMRD relay both directions
-test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c tests/test_hbp_gateway.c $(HBP_GATEWAY_SUPPORT)
+#  - test_repeater_id_from_login: translator_repeater_id() over real IPSC MASTER_REG_REQ
+#                           registrations: sole repeater's own ID, config ID with 0 or 2+
+#                           repeaters, and ignore_login_repeater_id forcing config ID
+test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c tests/test_hbp_gateway.c tests/test_repeater_id_from_login.c $(HBP_GATEWAY_SUPPORT) $(IPSC_MASTER_SUPPORT)
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/ipsc2hbpc_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_parity tests/test_parity.c $(TEST_SUPPORT)
@@ -114,6 +122,8 @@ test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_
 	/tmp/ipsc2hbpc_test_emblc
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_hbp_gateway tests/test_hbp_gateway.c $(HBP_GATEWAY_SUPPORT)
 	/tmp/ipsc2hbpc_test_hbp_gateway
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_repeater_id tests/test_repeater_id_from_login.c $(IPSC_MASTER_SUPPORT)
+	/tmp/ipsc2hbpc_test_repeater_id
 
 clean:
 	rm -f $(OBJECTS) $(BIN)

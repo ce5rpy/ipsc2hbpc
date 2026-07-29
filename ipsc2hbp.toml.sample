@@ -212,7 +212,18 @@ master_port = 62031
 
 # HBP repeater ID sent in all HBP packets.  Required — must be non-zero.
 # Typically the radio ID of the primary repeater, or a unique ID for this system.
+#
+# [ipsc] mode = "MASTER" only: when exactly one IPSC repeater is currently
+# registered, its own radio ID is used automatically instead of this value —
+# this value is the fallback whenever that's ambiguous (no repeater
+# registered yet, or more than one). Set ignore_login_repeater_id = true
+# below to always use this value regardless of how many repeaters are
+# registered.
 hbp_repeater_id = 3120000
+
+# Force hbp_repeater_id above even when exactly one IPSC repeater is
+# registered (see note above). Default false.
+# ignore_login_repeater_id = false
 
 # Passphrase used to compute the RPTK digest. Required for role = "CLIENT"
 # (must match the master's configuration); optional and unchecked for

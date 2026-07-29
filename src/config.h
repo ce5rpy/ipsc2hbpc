@@ -47,6 +47,8 @@ typedef struct {
     char     hbp_gateway_ip[64];    /* GATEWAY role only */
     int      hbp_gateway_port;      /* GATEWAY role only */
     uint32_t hbp_repeater_id;
+    int      ignore_login_repeater_id;  /* MASTER-mode IPSC: force hbp_repeater_id even
+                                          * with exactly one repeater registered */
     char     hbp_passphrase[256];
     int      hbp_passphrase_len;
     char     hbp_mode[16];          /* "TRACKING" | "PERSISTENT" — CLIENT role only */

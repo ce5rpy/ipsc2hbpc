@@ -686,3 +686,15 @@ int ipsc_has_peers(ipsc *ip)
 {
     return ip->is_master ? (peer_count(ip) > 0) : ip->connected;
 }
+
+uint32_t ipsc_sole_peer_id(ipsc *ip)
+{
+    if (!ip->is_master || peer_count(ip) != 1) return 0;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (ip->peers[i].used) {
+            const uint8_t *p = ip->peers[i].pid;
+            return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3];
+        }
+    }
+    return 0;
+}

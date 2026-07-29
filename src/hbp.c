@@ -255,6 +255,15 @@ static void disconnect(hbp *hb, int send_rptcl)
 
 static void hbp_connect(hbp *hb)
 {
+    /* Re-evaluated fresh at every login attempt (initial connect and every
+     * reconnect) -- not live-updated while ST_CONNECTED, so an established
+     * session keeps whatever identity it logged in with until the next one. */
+    uint32_t repeater_id = translator_repeater_id(hb->tr);
+    hb->radio_id[0] = (uint8_t)(repeater_id >> 24);
+    hb->radio_id[1] = (uint8_t)(repeater_id >> 16);
+    hb->radio_id[2] = (uint8_t)(repeater_id >> 8);
+    hb->radio_id[3] = (uint8_t)(repeater_id);
+
     hb->fd = hb->is_gateway
         ? udp_bind_connect(hb->cfg->hbp_bind_ip, hb->cfg->hbp_bind_port,
                            hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port)
@@ -276,7 +285,7 @@ static void hbp_connect(hbp *hb)
     memcpy(pkt + 4, hb->radio_id, 4);
     send_raw(hb, pkt, 8);
     arm_login_timer(hb);
-    LOGI(LOGN, "HBP: -> RPTL  radio_id=%u", hb->cfg->hbp_repeater_id);
+    LOGI(LOGN, "HBP: -> RPTL  radio_id=%u", repeater_id);
 }
 
 /* ---------------- public API ---------------- */
@@ -287,10 +296,8 @@ hbp *hbp_new(const Config *cfg, struct translator *tr, ev_loop *loop)
     hb->cfg = cfg; hb->tr = tr; hb->loop = loop; hb->fd = -1;
     hb->state = ST_DISCONNECTED;
     hb->is_gateway = !strcmp(cfg->hbp_role, "GATEWAY");
-    hb->radio_id[0] = (uint8_t)(cfg->hbp_repeater_id >> 24);
-    hb->radio_id[1] = (uint8_t)(cfg->hbp_repeater_id >> 16);
-    hb->radio_id[2] = (uint8_t)(cfg->hbp_repeater_id >> 8);
-    hb->radio_id[3] = (uint8_t)(cfg->hbp_repeater_id);
+    /* radio_id is (re-)computed fresh at each hbp_connect() call, from
+     * translator_repeater_id() -- see there. */
     return hb;
 }
 
