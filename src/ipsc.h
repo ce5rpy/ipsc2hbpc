@@ -18,4 +18,10 @@ void  ipsc_free(ipsc *ip);
 void  ipsc_send_voice(ipsc *ip, const uint8_t *pkt, int len);
 int   ipsc_has_peers(ipsc *ip);
 
+/* The sole registered repeater's own radio ID, if exactly one is currently
+ * registered (master mode only); 0 otherwise (no peers, more than one peer,
+ * or peer mode). 0 is never a valid DMR radio ID, so it doubles as "no
+ * unambiguous answer". */
+uint32_t ipsc_sole_peer_id(ipsc *ip);
+
 #endif
