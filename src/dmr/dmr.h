@@ -79,16 +79,16 @@ void dmr_encode_emblc(const uint8_t lc[9], uint8_t out[4][4]);
 /* Decode the 9-byte LC back out of the four 32-bit embedded-LC fragments
  * (inverse of dmr_encode_emblc). No FEC correction is performed — the data
  * bits are picked directly, same precedent as dmr_bptc_decode_full_lc.
- * One bit of the original 72 (LC byte 2 / SVC_OPT, bit 4 from MSB, mask
- * 0x08) is never directly transmitted — the encoder's own bit-interleave
- * table has a duplicate index in EMBLC_IDX row 2 that overwrites it instead
- * (matches the Python reference exactly, not a defect introduced here) — but
- * it is recovered anyway by checking which of its two possible values makes
- * the reconstructed LC's checksum (dmr_csum5) match the 5 checksum bits the
- * encoder did send.
- * Returns 1 on a checksum match (lc_out is the full, correct 9-byte LC), 0
- * if neither candidate matches (garbled/incomplete superframe — caller
- * should not trust lc_out). */
+ * All 72 original data bits (including LC byte 2 / SVC_OPT bit 0x08, at
+ * pre-interleave position 25) are read directly off the wire; a checksum
+ * mismatch means a garbled/incomplete superframe and the caller should not
+ * trust lc_out. (Position 25 used to be silently dropped by a duplicate
+ * index in EMBLC_IDX row 2 -- inherited from dmr_utils3.bptc.encode_emblc,
+ * the reference this was ported from, not introduced here -- and recovered
+ * via checksum guesswork instead. Fixed to transmit it for real: harmless
+ * for a normal call's LC, but it corrupts Talker Alias text specifically,
+ * confirmed independently by new-adn-server's and adn-dmr-server's own
+ * Talker Alias encoders, both bit-identical to this fix.) */
 int dmr_decode_emblc(const uint8_t frag[4][4], uint8_t lc_out[9]);
 
 /* ------------------------------------------------------------------ */
