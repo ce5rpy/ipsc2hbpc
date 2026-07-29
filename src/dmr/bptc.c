@@ -105,13 +105,26 @@ void dmr_bptc_decode_full_lc(const dmr_bit in196[196], uint8_t lc_out[9])
 }
 
 /* Embedded LC segment bit-pick indices (bptc.py encode_emblc).
- * Note: emblc_d row 1 reads index 24 (matches the reference exactly). */
+ *
+ * emblc_d row 1 reads index 25 -- dmr_utils3.bptc.encode_emblc (the reference
+ * this file was ported from) reads index 24 twice here instead, a
+ * transcription bug that silently drops data bit 20 (LC byte 2, mask 0x08)
+ * from the wire. Harmless for a normal group-voice LC (that bit lands in
+ * Service Options, rarely consulted), but for Talker Alias byte 2 is the
+ * header's format/length or a block's first text character, so the bug
+ * corrupts the alias. Confirmed independently by two other DMR master
+ * codebases that each special-cased their Talker Alias encoder around the
+ * same bug (new-adn-server's bptc.py, and adn-dmr-server's talker_alias.py
+ * _encode_emblc) -- both produce bit-identical output to this fix.
+ * dmr_utils3's own decode_emblc (and real HBlink's) never validates this bit
+ * against a checksum, so sending it correctly cannot break compatibility --
+ * it only makes Talker Alias decode correctly there too. */
 static const int EMBLC_IDX[4][32] = {
     { 0,16,32,48,64,80,96,112,  1,17,33,49,65,81,97,113,
       2,18,34,50,66,82,98,114,  3,19,35,51,67,83,99,115 },
     { 4,20,36,52,68,84,100,116, 5,21,37,53,69,85,101,117,
       6,22,38,54,70,86,102,118, 7,23,39,55,71,87,103,119 },
-    { 8,24,40,56,72,88,104,120, 9,24,41,57,73,89,105,121,
+    { 8,24,40,56,72,88,104,120, 9,25,41,57,73,89,105,121,
       10,26,42,58,74,90,106,122, 11,27,43,59,75,91,107,123 },
     { 12,28,44,60,76,92,108,124, 13,29,45,61,77,93,109,125,
       14,30,46,62,78,94,110,126, 15,31,47,63,79,95,111,127 },
@@ -121,9 +134,8 @@ static const int EMBLC_IDX[4][32] = {
  * after the 5 checksum-bit inserts (at 32,43,54,65,76) and the 7 row-Hamming
  * parity inserts (5 bits after each 11-bit group) that dmr_encode_emblc()
  * performs — derived by simulating those exact insertions symbolically.
- * Position 25 (data bit 20) is intentionally absent: EMBLC_IDX below never
- * transmits it directly (recovered via checksum instead, see
- * dmr_decode_emblc doc comment in dmr.h). */
+ * Position 25 (data bit 20) is read directly like every other bit now that
+ * EMBLC_IDX/SEG_IDX_INV_* below transmit it for real. */
 static const int DECODE_EMBLC_IDX[72] = {
     0,1,2,3,4,5,6,7,8,9,10,      16,17,18,19,20,21,22,23,24,25,26,
     32,33,34,35,36,37,38,39,40,41, 48,49,50,51,52,53,54,55,56,57,
@@ -135,12 +147,14 @@ static const int DECODE_EMBLC_IDX[72] = {
  * same simulation as DECODE_EMBLC_IDX above. */
 static const int EMBLC_CSUM_POS[5] = { 42, 58, 74, 90, 106 };
 
-/* Inverse of EMBLC_IDX below: for each of the 128 pre-interleave positions,
- * which (segment, bit) transmits it. -1 at position 25 == not directly
- * transmitted (see above; recovered via checksum in dmr_decode_emblc). */
+/* Inverse of EMBLC_IDX above: for each of the 128 pre-interleave positions,
+ * which (segment, bit) transmits it. Position 25 now genuinely transmitted
+ * (segment 2, bit 9) since the EMBLC_IDX fix above -- the checksum-based
+ * recovery in dmr_decode_emblc becomes a dead fallback (harmless) rather
+ * than the only way to learn that bit's value. */
 static const int SEG_IDX_INV_SEG[128] = {
     0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
-    0,0,0,0, 1,1,1,1, 2,-1,2,2, 3,3,3,3,
+    0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
     0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
     0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
     0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3,
@@ -150,7 +164,7 @@ static const int SEG_IDX_INV_SEG[128] = {
 };
 static const int SEG_IDX_INV_BIT[128] = {
     0,8,16,24, 0,8,16,24, 0,8,16,24, 0,8,16,24,
-    1,9,17,25, 1,9,17,25, 9,-1,17,25, 1,9,17,25,
+    1,9,17,25, 1,9,17,25, 1,9,17,25, 1,9,17,25,
     2,10,18,26, 2,10,18,26, 2,10,18,26, 2,10,18,26,
     3,11,19,27, 3,11,19,27, 3,11,19,27, 3,11,19,27,
     4,12,20,28, 4,12,20,28, 4,12,20,28, 4,12,20,28,
