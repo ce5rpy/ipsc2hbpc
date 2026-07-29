@@ -148,6 +148,7 @@ int config_load(const char *path, Config *cfg, char *err, size_t errlen)
     cfg->auth_enabled       = get_bool(t, &e, "ipsc", "auth_enabled", 1, 0);
     cfg->keepalive_watchdog = (int)get_int(t, &e, "ipsc", "keepalive_watchdog", 1, 0, 1, 5, 0, 0);
     cfg->ipsc_ts_prefer_call_info = get_bool(t, &e, "ipsc", "ts_prefer_call_info", 0, 0);
+    get_str(t, &e, "ipsc", "status_file", 0, "", cfg->status_file, sizeof cfg->status_file);
 
     { static const char *M[] = {"MASTER","PEER"};
       get_choice(t, &e, "ipsc", "mode", 0, "MASTER", M, 2, cfg->ipsc_mode, sizeof cfg->ipsc_mode); }

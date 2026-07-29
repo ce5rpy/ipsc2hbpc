@@ -23,6 +23,7 @@ typedef struct {
     int      auth_enabled;
     uint8_t  auth_key[20];
     int      keepalive_watchdog;
+    char     status_file[256];   /* optional; empty = disabled, see ipsc.c write_status_file() */
 
     /* [ipsc.capabilities] — computed wire bytes */
     uint8_t  ipsc_mode_byte;        /* 1 byte */
