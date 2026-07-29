@@ -40,6 +40,16 @@ struct hbp {
      * exact source IP *and port*, so our local port must be a fixed bind_ip/
      * bind_port instead of an ephemeral one — see hbp_connect(). */
     int                is_gateway;
+
+    /* Newer DMRGateway builds (post "Simplify the Host to DMR Gateway
+     * protocol") dropped the RPTL/RPTK/RPTC handshake entirely: no RPTACK is
+     * ever sent back, so waiting for one just wedges forever. If our very
+     * first RPTL (this process's lifetime) gets zero reply within
+     * LOGIN_TIMEOUT, assume that newer build and switch to its handshake-free
+     * wire protocol: treat the link as connected immediately and just send
+     * DMRD. Sticky for the process's life once set -- see login_timeout_cb()
+     * and hbp_connect(). */
+    int                no_handshake_protocol;
 };
 
 static void hbp_connect(hbp *hb);
@@ -49,11 +59,25 @@ static void disconnect(hbp *hb, int send_rptcl);
  * state: if the master goes away mid-handshake (or never answers the RPTL),
  * this fires and drives a disconnect -> reconnect instead of wedging in
  * ST_LOGIN forever. */
+static void become_connected_no_handshake(hbp *hb);
+
 static void login_timeout_cb(ev_loop *loop, void *ud)
 {
     (void)loop;
     hbp *hb = ud;
     hb->login_timer = NULL;
+
+    if (!hb->no_handshake_protocol && hb->state == ST_LOGIN) {
+        /* RPTL got zero reply -- not even RPTACK+salt -- so this was never
+         * confirmed as the handshake-based protocol. Assume a newer,
+         * handshake-free DMRGateway build instead of retrying RPTL forever. */
+        LOGW(LOGN, "HBP: no reply to RPTL within %.0fs — assuming a handshake-free "
+             "DMRGateway build, switching to no-handshake mode", LOGIN_TIMEOUT);
+        hb->no_handshake_protocol = 1;
+        become_connected_no_handshake(hb);
+        return;
+    }
+
     LOGE(LOGN, "HBP: login handshake timed out (state %d, %.0fs) — reconnecting",
          hb->state, LOGIN_TIMEOUT);
     disconnect(hb, 0);
@@ -183,6 +207,20 @@ static void become_connected(hbp *hb)
     translator_hbp_connected(hb->tr);
 }
 
+static void become_connected_no_handshake(hbp *hb)
+{
+    /* DMRGateway's newer, simplified protocol never reads anything back from
+     * us for liveness (its DMRP handler is a no-op) and there is no MSTPONG
+     * here to watch either, so there is nothing to ping and nothing to watch
+     * for -- just mark the link usable and rely on socket-level errors
+     * (recv_cb) to notice a real failure. */
+    if (hb->login_timer) { ev_timer_cancel(hb->loop, hb->login_timer); hb->login_timer = NULL; }
+    hb->state = ST_CONNECTED;
+    LOGI(LOGN, "HBP: no-handshake mode  CONNECTED to %s:%d (new-protocol DMRGateway)",
+         hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
+    translator_hbp_connected(hb->tr);
+}
+
 static void recv_cb(ev_loop *loop, int fd, void *ud)
 {
     hbp *hb = ud;
@@ -217,6 +255,11 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
     } else if (memcmp(buf, "DMRD", 4) == 0) {
         if (hb->state == ST_CONNECTED)
             translator_hbp_voice_received(hb->tr, buf, n);
+    } else if (n >= 4 && memcmp(buf, "DMRP", 4) == 0) {
+        /* DMRGateway's simplified protocol pinging us one-way -- it reads no
+         * reply (see become_connected_no_handshake()), just log it plainly
+         * instead of falling into "unknown packet". */
+        LOGD(LOGN, "HBP: <- DMRP");
     } else {
         LOGD(LOGN, "HBP: unknown packet len=%d", n);
     }
@@ -238,7 +281,7 @@ static void schedule_reconnect(hbp *hb)
 
 static void disconnect(hbp *hb, int send_rptcl)
 {
-    if (send_rptcl && hb->state == ST_CONNECTED) {
+    if (send_rptcl && hb->state == ST_CONNECTED && !hb->no_handshake_protocol) {
         /* RPTCL magic (5 bytes) + radio_id(4) = 9 bytes */
         uint8_t cl[5 + 4];
         memcpy(cl, "RPTCL", 5);
@@ -274,12 +317,20 @@ static void hbp_connect(hbp *hb)
         return;
     }
     ev_add_fd(hb->loop, hb->fd, recv_cb, hb);
-    hb->state = ST_LOGIN;
     if (hb->is_gateway)
         LOGI(LOGN, "HBP: UDP endpoint bound %s:%d -> %s:%d", hb->cfg->hbp_bind_ip, hb->cfg->hbp_bind_port,
              hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
     else
         LOGI(LOGN, "HBP: UDP endpoint created -> %s:%d", hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
+
+    if (hb->no_handshake_protocol) {
+        /* Already confirmed handshake-free this run -- don't wait out
+         * another LOGIN_TIMEOUT on a RPTL nobody will ever answer. */
+        become_connected_no_handshake(hb);
+        return;
+    }
+
+    hb->state = ST_LOGIN;
     uint8_t pkt[4 + 4];
     memcpy(pkt, "RPTL", 4);
     memcpy(pkt + 4, hb->radio_id, 4);
