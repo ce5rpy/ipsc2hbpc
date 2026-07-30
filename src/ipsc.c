@@ -70,6 +70,7 @@ struct ipsc {
     int      npeers;
     ev_timer *watchdog;
     status_entry_t status[MAX_STATUS_ENTRIES];
+    double   last_status_write;  /* ev_now() at the last write_status_file() call */
 
     /* peer */
     int       state;
@@ -156,6 +157,16 @@ static void write_status_file(ipsc *ip)
         }
     }
 
+    char gts[32];
+    time_t gnow = time(NULL);
+    struct tm gtmv;
+    localtime_r(&gnow, &gtmv);
+    strftime(gts, sizeof gts, "%Y-%m-%dT%H:%M:%S", &gtmv);
+    /* A monitor should check this line first: if it's older than roughly
+     * keepalive_watchdog seconds, ipsc2hbpc itself is gone (crashed, killed,
+     * etc.) and every state below is stale -- treat all repeaters as unknown
+     * rather than trusting a possibly-stale "connected". */
+    fprintf(f, "# generated: %s\n", gts);
     fprintf(f, "# timestamp           state        id       ip               port\n");
     for (int i = 0; i < MAX_STATUS_ENTRIES; i++) {
         if (!ip->status[i].used) continue;
@@ -173,6 +184,8 @@ static void write_status_file(ipsc *ip)
 
     if (rename(tmp, ip->cfg->status_file) != 0)
         LOGW(LOGN, "status file: rename %s -> %s failed (%s)", tmp, ip->cfg->status_file, strerror(errno));
+
+    ip->last_status_write = ev_now(ip->loop);
 }
 
 /* Record a connect/disconnect for IPSC peer id (master role) and rewrite the
@@ -428,6 +441,13 @@ static void watchdog_cb(ev_loop *loop, void *ud)
         }
     }
     translator_check_call_timeouts(ip->tr);
+
+    /* Heartbeat: rewrite the status file periodically even with no state
+     * change, so a monitor can tell "nothing changed" from "this process
+     * died" by how stale the file's "generated" line is. */
+    if (ip->cfg->status_file[0] != '\0' && now - ip->last_status_write >= ip->cfg->keepalive_watchdog)
+        write_status_file(ip);
+
     ip->watchdog = ev_timer_after(loop, 5.0, watchdog_cb, ip);
 }
 

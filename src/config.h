@@ -23,7 +23,10 @@ typedef struct {
     int      auth_enabled;
     uint8_t  auth_key[20];
     int      keepalive_watchdog;
-    char     status_file[256];   /* optional; empty = disabled, see ipsc.c write_status_file() */
+    char     status_file[256];   /* optional; empty = disabled, see ipsc.c write_status_file().
+                                  * Rewritten at least every keepalive_watchdog seconds even with
+                                  * no state change, so a monitor can tell a dead ipsc2hbpc
+                                  * process from one with nothing to report. */
 
     /* [ipsc.capabilities] — computed wire bytes */
     uint8_t  ipsc_mode_byte;        /* 1 byte */
