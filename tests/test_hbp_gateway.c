@@ -88,6 +88,15 @@ static int fake_recv(int fd, uint8_t *buf, size_t cap, char *src_ip, int *src_po
     return udp_recvfrom(fd, buf, cap, src_ip, src_port);
 }
 
+/* Pump the real event loop for `secs` seconds so a timer further out than
+ * pump()'s 0.1s can fire (used for LOGIN_TIMEOUT/NO_HANDSHAKE_PING_INTERVAL,
+ * both hardcoded at 15s/10s in hbp.c). */
+static void pump_for(ev_loop *loop, double secs)
+{
+    ev_timer_after(loop, secs, stop_cb, loop);
+    ev_run(loop);
+}
+
 int main(void)
 {
     Config cfg; char err[4096];
@@ -189,10 +198,65 @@ int main(void)
     checks++;
     if (hbp_is_connected(hb)) { fprintf(stderr, "FAIL: still connected after deactivate\n"); fails++; }
 
-    printf("HBP gateway role: %d checks, %d failures\n", checks, fails);
-
     close(fake_fd);
     hbp_stop(hb);
     hbp_free(hb); translator_free(tr); ev_free(loop);
+
+    /* --- Part 2: DMRGateway never answers RPTL at all (current DMRGateway
+     * master / MMDVM-Host build, which speaks a handshake-free protocol) --
+     * verifies the AUTO fallback: connect anyway after LOGIN_TIMEOUT, ping
+     * with bare "DMRP" every NO_HANDSHAKE_PING_INTERVAL, and skip RPTCL on
+     * disconnect since nobody on that protocol parses it. */
+    Config cfg2;
+    if (config_load("tests/hbp_gateway.toml", &cfg2, err, sizeof err)) {
+        fprintf(stderr, "config (fallback): %s\n", err); return 2;
+    }
+    ev_loop *loop2 = ev_new();
+    translator *tr2 = translator_new(&cfg2, loop2);
+    hbp *hb2 = hbp_new(&cfg2, tr2, loop2);
+    translator_set_protocols(tr2, (struct ipsc *)1, hb2);
+
+    int fake_fd2 = udp_bind(cfg2.hbp_gateway_ip, cfg2.hbp_gateway_port);
+    if (fake_fd2 < 0) { fprintf(stderr, "FAIL: could not bind fake master socket (fallback)\n"); return 1; }
+
+    /* 9. RPTL goes out as usual, but the fake master stays silent. */
+    hbp_start(hb2);
+    n = fake_recv(fake_fd2, buf, sizeof buf, src_ip, &src_port);
+    checks++;
+    if (n < 8 || memcmp(buf, "RPTL", 4) != 0) { fprintf(stderr, "FAIL: expected RPTL, got n=%d\n", n); fails++; }
+    checks++;
+    if (hbp_is_connected(hb2)) { fprintf(stderr, "FAIL: connected before LOGIN_TIMEOUT elapsed\n"); fails++; }
+
+    /* 10. After LOGIN_TIMEOUT (15s) with zero reply, falls back and connects
+     * anyway -- matches DMRGateway builds that never answer RPTL at all. */
+    pump_for(loop2, 15.5);
+    checks++;
+    if (!hbp_is_connected(hb2)) { fprintf(stderr, "FAIL: not connected after LOGIN_TIMEOUT fallback\n"); fails++; }
+
+    /* 11. DMRD relay works right away once fallen back, no handshake needed. */
+    ngv = 0;
+    build_dmrd_head(frame, 0, call_lc);
+    udp_sendto(fake_fd2, frame, DMRD_LEN, cfg2.hbp_bind_ip, cfg2.hbp_bind_port);
+    pump(loop2);
+    checks++;
+    if (ngv != 1) { fprintf(stderr, "FAIL: fallback mode expected 1 relayed IPSC frame, got %d\n", ngv); fails++; }
+
+    /* 12. After NO_HANDSHAKE_PING_INTERVAL (10s), the bare "DMRP" ping fires --
+     * matches MMDVM-Host's CDMRNetwork::writePing() exactly. */
+    pump_for(loop2, 10.5);
+    n = fake_recv(fake_fd2, buf, sizeof buf, src_ip, &src_port);
+    checks++;
+    if (n != 4 || memcmp(buf, "DMRP", 4) != 0) { fprintf(stderr, "FAIL: expected 4-byte DMRP ping, got n=%d\n", n); fails++; }
+
+    /* 13. Disconnect sends no RPTCL -- nobody on this protocol parses it. */
+    hbp_stop(hb2);
+    n = fake_recv(fake_fd2, buf, sizeof buf, src_ip, &src_port);
+    checks++;
+    if (n >= 0) { fprintf(stderr, "FAIL: fallback mode sent RPTCL (n=%d) on disconnect\n", n); fails++; }
+
+    close(fake_fd2);
+    hbp_free(hb2); translator_free(tr2); ev_free(loop2);
+
+    printf("HBP gateway role: %d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

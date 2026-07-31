@@ -5,6 +5,7 @@
 #include "net.h"
 #include "crypto.h"
 #include "log.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,14 +42,13 @@ struct hbp {
      * bind_port instead of an ephemeral one — see hbp_connect(). */
     int                is_gateway;
 
-    /* Newer DMRGateway builds (post "Simplify the Host to DMR Gateway
-     * protocol") dropped the RPTL/RPTK/RPTC handshake entirely: no RPTACK is
-     * ever sent back, so waiting for one just wedges forever. If our very
-     * first RPTL (this process's lifetime) gets zero reply within
-     * LOGIN_TIMEOUT, assume that newer build and switch to its handshake-free
-     * wire protocol: treat the link as connected immediately and just send
-     * DMRD. Sticky for the process's life once set -- see login_timeout_cb()
-     * and hbp_connect(). */
+    /* GATEWAY role only: try the old RPTL/RPTK/RPTC handshake first (below),
+     * and if our very first RPTL (this process's lifetime) gets zero reply
+     * within LOGIN_TIMEOUT, assume a newer, handshake-free DMRGateway build
+     * (post "Simplify the Host to DMR Gateway protocol") and switch to it:
+     * treat the link as connected immediately and just send DMRD.  Sticky
+     * for the process's life once set -- see login_timeout_cb() and
+     * hbp_connect(). */
     int                no_handshake_protocol;
 };
 
@@ -67,7 +67,7 @@ static void login_timeout_cb(ev_loop *loop, void *ud)
     hbp *hb = ud;
     hb->login_timer = NULL;
 
-    if (!hb->no_handshake_protocol && hb->state == ST_LOGIN) {
+    if (hb->is_gateway && !hb->no_handshake_protocol && hb->state == ST_LOGIN) {
         /* RPTL got zero reply -- not even RPTACK+salt -- so this was never
          * confirmed as the handshake-based protocol. Assume a newer,
          * handshake-free DMRGateway build instead of retrying RPTL forever. */
@@ -207,15 +207,33 @@ static void become_connected(hbp *hb)
     translator_hbp_connected(hb->tr);
 }
 
+/* DMRGateway's newer, simplified protocol never reads anything back from us
+ * for liveness (its DMRP handler is a no-op) and there is no MSTPONG here to
+ * watch either, so there is nothing to watch for -- rely on socket-level
+ * errors (recv_cb) to notice a real failure. We still send the bare 4-byte
+ * "DMRP" ping ourselves every NO_HANDSHAKE_PING_INTERVAL, matching MMDVM-
+ * Host's CDMRNetwork exactly (see DMRNetwork.cpp: m_pingTimer(1000U, 10U)
+ * and writePing()) -- some NAT/firewall paths only keep a UDP mapping open
+ * while traffic flows in both directions, and DMRGateway pinging us alone
+ * isn't enough to keep that path alive from our end. */
+#define NO_HANDSHAKE_PING_INTERVAL 10.0
+
+static void no_handshake_ping_cb(ev_loop *loop, void *ud)
+{
+    hbp *hb = ud;
+    hb->ping_timer = NULL;
+    if (hb->state != ST_CONNECTED) return;
+    send_raw(hb, (const uint8_t *)"DMRP", 4);
+    LOGD(LOGN, "HBP: -> DMRP");
+    hb->ping_timer = ev_timer_after(loop, NO_HANDSHAKE_PING_INTERVAL, no_handshake_ping_cb, hb);
+}
+
 static void become_connected_no_handshake(hbp *hb)
 {
-    /* DMRGateway's newer, simplified protocol never reads anything back from
-     * us for liveness (its DMRP handler is a no-op) and there is no MSTPONG
-     * here to watch either, so there is nothing to ping and nothing to watch
-     * for -- just mark the link usable and rely on socket-level errors
-     * (recv_cb) to notice a real failure. */
     if (hb->login_timer) { ev_timer_cancel(hb->loop, hb->login_timer); hb->login_timer = NULL; }
     hb->state = ST_CONNECTED;
+    hb->no_handshake_protocol = 1;   /* keeps disconnect()'s "skip RPTCL" guard correct */
+    hb->ping_timer = ev_timer_after(hb->loop, NO_HANDSHAKE_PING_INTERVAL, no_handshake_ping_cb, hb);
     LOGI(LOGN, "HBP: no-handshake mode  CONNECTED to %s:%d (new-protocol DMRGateway)",
          hb->cfg->hbp_master_ip, hb->cfg->hbp_master_port);
     translator_hbp_connected(hb->tr);
