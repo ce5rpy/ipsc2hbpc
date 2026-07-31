@@ -206,10 +206,15 @@ use_safe_defaults = true
 #             validates the RPTK digest — except the local socket binds
 #             to a fixed bind_ip/bind_port instead of an ephemeral one,
 #             because DMRGateway filters incoming packets by exact
-#             source IP *and port*. master_ip/master_port are ignored
-#             (gateway_ip/gateway_port are used instead); passphrase/the
-#             RPTC announcement fields below are still sent but not
-#             checked by DMRGateway. hbp_mode still applies (see below).
+#             source IP *and port*. If DMRGateway never answers the RPTL
+#             within 15s, ipsc2hbp assumes a newer, handshake-free build
+#             (post commit b344248 "Simplify the Host to DMR Gateway
+#             protocol") and switches to it automatically — sticky for
+#             the rest of the process's life. master_ip/master_port are
+#             ignored (gateway_ip/gateway_port are used instead);
+#             passphrase/the RPTC announcement fields below are still
+#             sent when the handshake runs, but not checked by
+#             DMRGateway. hbp_mode still applies (see below).
 role = "CLIENT"
 
 # Upstream HBP master to connect to. Only used when role = "CLIENT".
