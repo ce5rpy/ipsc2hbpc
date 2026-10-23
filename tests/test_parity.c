@@ -8,6 +8,8 @@
 #include "../src/translate.h"
 #include "../src/config.h"
 #include "../src/eventloop.h"
+#include "../src/ipsc_const.h"
+#include "../src/dmr/dmr.h"
 
 /* ---- captured DMRD output ---- */
 #define MAXCAP 64
@@ -115,9 +117,134 @@ int main(void)
     }
     if (fi) fclose(fi);
     if (fr) fclose(fr);
+    translator_free(tr);
+
+    /* ---- bad-voice flags (IPSC->HBP): flagged AMBE frames become MMDVMHost silence ---- */
+    static const uint8_t SIL[9] = {0xB9,0xE8,0x81,0x52,0x61,0x73,0x00,0x2A,0x6B};
+    static const int want[2][3] = {{1,1,1}, {0,1,0}};   /* per voice frame: flagged? */
+    int bad_fails = 0;
+    tr = translator_new(&cfg, loop);
+    translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
+    ncap = 0;
+    fi = fopen("tests/parity_in.txt", "r");
+    /* HEAD + bursts A-E: B/C/D are held until E, so feed through E to see B. */
+    for (int k = 0; k < 6 && fi && fgets(line, sizeof line, fi); k++) {
+        int ts, bt; char hex[400];
+        if (sscanf(line, "%d %d %399s", &ts, &bt, hex) != 3) continue;
+        uint8_t raw[400]; int n = unhex(hex, raw);
+        if (k == 1 || k == 2) {
+            const int *w = want[k - 1];
+            if (w[0]) raw[32] |= 0x01;
+            if (w[1]) raw[33 + 49 / 8] |= (uint8_t)(0x80 >> (49 % 8));
+            if (w[2]) raw[33 + 99 / 8] |= (uint8_t)(0x80 >> (99 % 8));
+        }
+        translator_ipsc_voice_received(tr, raw, n, ts, bt);
+    }
+    if (fi) fclose(fi);
+    if (ncap != 6) { fprintf(stderr, "FAIL bad-voice: expected 6 DMRD, got %d\n", ncap); bad_fails++; }
+    for (int v = 0; v < 2 && v + 1 < ncap; v++) {
+        dmr_bit b[264]; dmr_bytes_to_bits(cap[v + 1] + 20, 33, b);
+        dmr_bit f[3][72];
+        memcpy(f[0], b, 72);
+        memcpy(f[1], b + 72, 36); memcpy(f[1] + 36, b + 156, 36);
+        memcpy(f[2], b + 192, 72);
+        dmr_bit s[72]; dmr_bytes_to_bits(SIL, 9, s);
+        for (int i = 0; i < 3; i++) {
+            int is_sil = memcmp(f[i], s, sizeof s) == 0;
+            if (is_sil != want[v][i]) {
+                fprintf(stderr, "FAIL bad-voice: voice %d frame %d silence=%d, want %d\n", v, i + 1, is_sil, want[v][i]);
+                bad_fails++;
+            }
+        }
+    }
+    printf("Bad-voice flags (IPSC->HBP): %d failures\n", bad_fails);
+    translator_free(tr);
+
+    /* ---- superframe re-sync (IPSC->HBP): weak-signal call where the repeater lost a
+     * burst (0x13 placeholder, dropped in ipsc.c) and restarted at burst A ---- */
+    int sync_fails = 0, sync_seen = 0;
+    tr = translator_new(&cfg, loop);
+    translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
+    ncap = 0;
+    int want_sync[MAXCAP];
+    int nin = 0;
+    fi = fopen("tests/synclost_ipsc_in.txt", "r");
+    while (fi && fgets(line, sizeof line, fi)) {
+        int ts, bt; char hex[400];
+        if (sscanf(line, "%d %d %399s", &ts, &bt, hex) != 3) continue;
+        if ((bt & 0x7F) == 0x13) continue;
+        uint8_t raw[400]; int n = unhex(hex, raw);
+        if (nin < MAXCAP) want_sync[nin++] = (bt != 1 && bt != 2) ? ((raw[32] & 0x40) ? 1 : 0) : -1;
+        translator_ipsc_voice_received(tr, raw, n, ts, bt);
+    }
+    if (fi) fclose(fi);
+    if (ncap != nin) { fprintf(stderr, "FAIL re-sync: %d IPSC packets -> %d DMRD\n", nin, ncap); sync_fails++; }
+    int expect_pos = -1;
+    for (int i = 0; i < ncap && i < nin; i++) {
+        if (want_sync[i] < 0) continue;
+        int fl = cap[i][15];
+        int is_sync = (fl & 0x30) == 0x10;
+        if (want_sync[i]) {
+            sync_seen++;
+            if (!is_sync) { fprintf(stderr, "FAIL re-sync: DMRD[%d] burst A sent as flags 0x%02x\n", i, fl); sync_fails++; }
+            expect_pos = 1;
+        } else if (expect_pos > 0) {
+            if (is_sync || (fl & 0x0F) != expect_pos) {
+                fprintf(stderr, "FAIL re-sync: DMRD[%d] flags 0x%02x, want voice burst %d\n", i, fl, expect_pos);
+                sync_fails++;
+            }
+            expect_pos++;
+        }
+    }
+    printf("Superframe re-sync (IPSC->HBP): %d burst A checked, %d failures\n", sync_seen, sync_fails);
+    translator_free(tr);
+
+    /* ---- late entry on weak signal (IPSC->HBP): weak-signal call 3120101 -> TG 2.
+     * Joining at packet 4, the first burst E (packet 8, ctrl 0x96) has a corrupt LC and
+     * must be skipped; anchor on packet 14 (0x16).  Joining at packet 33, the first
+     * burst E (packet 38, ctrl 0x17: voice frame bad, LC good) is usable.  Case 3 forces
+     * packet 8's FLCO to group so only the LC-error bit can reject it. ---- */
+    static const int le_join[3] = {4, 33, 4}, le_anchor[3] = {14, 38, 14};
+    int le_fails = 0;
+    for (int c = 0; c < 3; c++) {
+        tr = translator_new(&cfg, loop);
+        translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
+        ncap = 0;
+        int idx = -1, anchor = -1;
+        fi = fopen("tests/lateentry_ipsc_in.txt", "r");
+        while (fi && fgets(line, sizeof line, fi)) {
+            int ts, bt; char hex[400];
+            if (sscanf(line, "%d %d %399s", &ts, &bt, hex) != 3) continue;
+            idx++;
+            if (idx < le_join[c] || bt == 1 || (bt & 0x7F) == 0x13) continue;
+            uint8_t raw[400]; int n = unhex(hex, raw);
+            if (c == 2 && idx == 8) raw[GV_BE_LC_FLCO_OFF] = FLCO_GROUP;
+            int before = ncap;
+            translator_ipsc_voice_received(tr, raw, n, ts, bt);
+            if (anchor < 0 && ncap > before) anchor = idx;
+        }
+        if (fi) fclose(fi);
+        if (anchor != le_anchor[c]) {
+            fprintf(stderr, "FAIL late entry: joined at %d, anchored at packet %d, want %d\n", le_join[c], anchor, le_anchor[c]);
+            le_fails++;
+        }
+        for (int i = 0; i < ncap; i++) {
+            unsigned src = (unsigned)(cap[i][5]<<16 | cap[i][6]<<8 | cap[i][7]);
+            unsigned dst = (unsigned)(cap[i][8]<<16 | cap[i][9]<<8 | cap[i][10]);
+            if (src != 3120101 || dst != 2) {
+                fprintf(stderr, "FAIL late entry: joined at %d, DMRD[%d] %u->%u, want 3120101->2\n", le_join[c], i, src, dst);
+                le_fails++; break;
+            }
+        }
+        translator_free(tr);
+    }
+    printf("Late entry on weak signal (IPSC->HBP): %d failures\n", le_fails);
+
 
     /* ---- private call smoke (C1a PVT_VOICE VOICE_HEAD → DMRD with CALL_P) ---- */
     int pvt_fails = 0;
+    tr = translator_new(&cfg, loop);
+    translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
     ncap = 0;
     {
         /* First VOICE_HEAD from captures/20260720-private-ipsc2hbp-ts1.pcap */
@@ -172,5 +299,5 @@ int main(void)
     printf("Private smoke: %d failures\n", pvt_fails);
 
     translator_free(tr); ev_free(loop);
-    return (fails || in_fails || pvt_fails) ? 1 : 0;
+    return (fails || in_fails || bad_fails || sync_fails || le_fails || pvt_fails) ? 1 : 0;
 }

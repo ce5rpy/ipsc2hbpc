@@ -90,15 +90,6 @@ static void arm_login_timer(hbp *hb)
     hb->login_timer = ev_timer_after(hb->loop, LOGIN_TIMEOUT, login_timeout_cb, hb);
 }
 
-/* ljust(n, '\0')[:n] -- RPTO options blob. */
-static void enc_field(uint8_t *dst, int n, const char *s)
-{
-    int sl = (int)strlen(s);
-    if (sl > n) sl = n;
-    memcpy(dst, s, (size_t)sl);
-    for (int i = sl; i < n; i++) dst[i] = 0;
-}
-
 /* Text field: ljust(n, ' ')[:n] -- MMDVMHost's "%-n.ns". Space padding, not NUL:
  * stricter masters (BrandMeister) reject an RPTC carrying NULs in its fields. */
 static void enc_text(uint8_t *dst, int n, const char *s)
@@ -182,11 +173,15 @@ static void on_rptack(hbp *hb, const uint8_t *d, int len)
         LOGI(LOGN, "HBP: <- RPTACK(auth)  -> RPTC (%d bytes)", n);
     } else if (hb->state == ST_CONFIG_SENT) {
         if (hb->cfg->options[0]) {
+            /* Variable-length, unpadded: the server reads the rest of the
+             * datagram as the options string. */
             uint8_t pkt[4 + 4 + 300];
             memcpy(pkt, "RPTO", 4);
             memcpy(pkt + 4, hb->radio_id, 4);
-            enc_field(pkt + 8, 300, hb->cfg->options);
-            send_raw(hb, pkt, 308);
+            int ol = (int)strlen(hb->cfg->options);
+            if (ol > 300) ol = 300;
+            memcpy(pkt + 8, hb->cfg->options, (size_t)ol);
+            send_raw(hb, pkt, 8 + ol);
             hb->state = ST_OPTIONS_SENT;
             arm_login_timer(hb);
             LOGI(LOGN, "HBP: <- RPTACK(config)  -> RPTO  options=%s", hb->cfg->options);
