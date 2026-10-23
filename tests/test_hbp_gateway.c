@@ -153,6 +153,18 @@ int main(void)
     n = fake_recv(fake_fd, buf, sizeof buf, src_ip, &src_port);
     checks++;
     if (n != RPTC_LEN || memcmp(buf, "RPTC", 4) != 0) { fprintf(stderr, "FAIL: expected %d-byte RPTC, got n=%d\n", RPTC_LEN, n); fails++; }
+    /* RPTC fields laid out like MMDVMHost: space padded, never NUL (BrandMeister
+     * rejects NULs), numeric fields zero-padded to their fixed width. */
+    checks++;
+    if (n == RPTC_LEN && memchr(buf + 8, 0, RPTC_LEN - 8)) { fprintf(stderr, "FAIL: RPTC fields contain NUL padding\n"); fails++; }
+    checks++;
+    if (n == RPTC_LEN) {
+        /* rx(9) tx(9) power(2) cc(2) at 16..37, height(3) at 55..57 */
+        int ok = 1;
+        for (int i = 16; i < 38; i++) if (buf[i] < '0' || buf[i] > '9') ok = 0;
+        for (int i = 55; i < 58; i++) if (buf[i] < '0' || buf[i] > '9') ok = 0;
+        if (!ok) { fprintf(stderr, "FAIL: RPTC numeric fields not zero-padded: %.50s\n", (char *)buf + 8); fails++; }
+    }
 
     /* 5. RPTACK -> CONNECTED (test fixture has no options, so no RPTO step). */
     udp_sendto(fake_fd, rptack2, 10, cfg.hbp_bind_ip, cfg.hbp_bind_port);

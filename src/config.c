@@ -312,7 +312,7 @@ int config_load(const char *path, Config *cfg, char *err, size_t errlen)
     get_str(t, &e, "hbp", "description", 0, "",          cfg->description, sizeof cfg->description);
     get_str(t, &e, "hbp", "url",         0, "",          cfg->url,         sizeof cfg->url);
     get_str(t, &e, "hbp", "software_id", 0, "ipsc2hbp",  cfg->software_id, sizeof cfg->software_id);
-    get_str(t, &e, "hbp", "package_id",  0, "1.0.0",     cfg->package_id,  sizeof cfg->package_id);
+    get_str(t, &e, "hbp", "package_id",  0, "MMDVM_IPSC2Net", cfg->package_id,  sizeof cfg->package_id);
 
     toml_free(t);
 

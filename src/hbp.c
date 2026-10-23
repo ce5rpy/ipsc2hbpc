@@ -5,6 +5,7 @@
 #include "net.h"
 #include "crypto.h"
 #include "log.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,7 +90,7 @@ static void arm_login_timer(hbp *hb)
     hb->login_timer = ev_timer_after(hb->loop, LOGIN_TIMEOUT, login_timeout_cb, hb);
 }
 
-/* ljust(n, '\0')[:n] */
+/* ljust(n, '\0')[:n] -- RPTO options blob. */
 static void enc_field(uint8_t *dst, int n, const char *s)
 {
     int sl = (int)strlen(s);
@@ -98,25 +99,51 @@ static void enc_field(uint8_t *dst, int n, const char *s)
     for (int i = sl; i < n; i++) dst[i] = 0;
 }
 
+/* Text field: ljust(n, ' ')[:n] -- MMDVMHost's "%-n.ns". Space padding, not NUL:
+ * stricter masters (BrandMeister) reject an RPTC carrying NULs in its fields. */
+static void enc_text(uint8_t *dst, int n, const char *s)
+{
+    int sl = (int)strlen(s);
+    if (sl > n) sl = n;
+    memcpy(dst, s, (size_t)sl);
+    for (int i = sl; i < n; i++) dst[i] = ' ';
+}
+
+/* Format into a scratch buffer and copy exactly n bytes (the "%n.ns" step). */
+static void enc_fmt(uint8_t *dst, int n, const char *fmt, ...)
+{
+    char tmp[64];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    enc_text(dst, n, tmp);
+}
+
+/* RPTC laid out exactly as MMDVMHost's CDMRNetwork::writeConfig():
+ *   "%-8.8s%09u%09u%02u%02u%8.8s%9.9s%03d%-20.20s%-19.19s%c%-124.124s%-40.40s%-40.40s"
+ * with latitude "%08f" and longitude "%09f" cut to 8 and 9 characters. Numeric
+ * fields are re-formatted from the config strings, so "1" -> "01", "10" -> "010". */
 static int build_rptc(hbp *hb, uint8_t out[RPTC_LEN])
 {
+    const Config *c = hb->cfg;
     int p = 0;
     memcpy(out + p, "RPTC", 4); p += 4;
     memcpy(out + p, hb->radio_id, 4); p += 4;
-    enc_field(out + p, 8,  hb->cfg->callsign);    p += 8;
-    enc_field(out + p, 9,  hb->cfg->rx_freq);     p += 9;
-    enc_field(out + p, 9,  hb->cfg->tx_freq);     p += 9;
-    enc_field(out + p, 2,  hb->cfg->tx_power);    p += 2;
-    enc_field(out + p, 2,  hb->cfg->colorcode);   p += 2;
-    enc_field(out + p, 8,  hb->cfg->latitude);    p += 8;
-    enc_field(out + p, 9,  hb->cfg->longitude);   p += 9;
-    enc_field(out + p, 3,  hb->cfg->height);      p += 3;
-    enc_field(out + p, 20, hb->cfg->location);    p += 20;
-    enc_field(out + p, 19, hb->cfg->description); p += 19;
-    out[p++] = '3';                               /* RPTC_SLOTS_VALUE */
-    enc_field(out + p, 124, hb->cfg->url);        p += 124;
-    enc_field(out + p, 40,  hb->cfg->software_id);p += 40;
-    enc_field(out + p, 40,  hb->cfg->package_id); p += 40;
+    enc_text(out + p, 8,  c->callsign);                                     p += 8;
+    enc_fmt (out + p, 9,  "%09lu", strtoul(c->rx_freq, NULL, 10));          p += 9;
+    enc_fmt (out + p, 9,  "%09lu", strtoul(c->tx_freq, NULL, 10));          p += 9;
+    enc_fmt (out + p, 2,  "%02lu", strtoul(c->tx_power, NULL, 10) % 100);   p += 2;
+    enc_fmt (out + p, 2,  "%02lu", strtoul(c->colorcode, NULL, 10) % 100);  p += 2;
+    enc_fmt (out + p, 8,  "%08f",  strtod(c->latitude, NULL));              p += 8;
+    enc_fmt (out + p, 9,  "%09f",  strtod(c->longitude, NULL));             p += 9;
+    enc_fmt (out + p, 3,  "%03ld", strtol(c->height, NULL, 10) % 1000);     p += 3;
+    enc_text(out + p, 20, c->location);                                     p += 20;
+    enc_text(out + p, 19, c->description);                                  p += 19;
+    out[p++] = '3';                                                         /* RPTC_SLOTS_VALUE */
+    enc_text(out + p, 124, c->url);                                         p += 124;
+    enc_text(out + p, 40,  c->software_id);                                 p += 40;
+    enc_text(out + p, 40,  c->package_id);                                  p += 40;
     return p;   /* == RPTC_LEN */
 }
 

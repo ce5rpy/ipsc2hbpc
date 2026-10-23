@@ -299,4 +299,4 @@ location    = "Smalltown KS"
 description = "IPSC-HBP Bridge"
 url         = ""
 software_id = "ipsc2hbp"
-package_id  = "duplex"
+package_id  = "MMDVM_IPSC2Net" # BrandMeister NAKs the RPTC with other values (e.g. "duplex")
