@@ -137,6 +137,10 @@ static void u32_be(uint32_t v, uint8_t out[4])
     out[0]=(uint8_t)(v>>24); out[1]=(uint8_t)(v>>16); out[2]=(uint8_t)(v>>8); out[3]=(uint8_t)v;
 }
 
+/* 72-bit AMBE silence frame from MMDVMHost DMR_SILENCE_DATA; replaces frames the
+ * repeater flagged bad (IPSC->HBP). */
+static const uint8_t AMBE_SILENCE_MMDVM[9] = {0xB9,0xE8,0x81,0x52,0x61,0x73,0x00,0x2A,0x6B};
+
 /* precompute 19-byte IPSC AMBE payload of three silence frames */
 static void make_ambe_silence(uint8_t out[19])
 {
@@ -547,7 +551,12 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
         if (!tr->out_has_stream[ts]) {
             /* Late entry: anchor identity to a voice-user burst E (GVCU or UU).
              * Talker Alias / GPS FLCO puts alias bytes in the header — defer. */
-            if (len <= GV_BE_LC_FLCO_OFF || data[32] != GV_BE_FLAG) return;
+            int ctrl = data[GV_CTRL_OFF];
+            if (len <= GV_BE_LC_FLCO_OFF || !(ctrl & GV_CTRL_EMB_LC)) return;
+            if (ctrl & GV_CTRL_LC_ERR) {
+                LOGD(LOGN, "IPSC late entry deferred ts=%d — burst E embedded LC failed its check", ts);
+                return;
+            }
             uint8_t flco = data[GV_BE_LC_FLCO_OFF];
             uint8_t want = is_private ? FLCO_UNIT : FLCO_GROUP;
             if (flco != want) {
@@ -572,21 +581,28 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
          * bytes on a TA superframe); all AMBE is forwarded under the locked identity. */
         if (len < 52) { LOGW(LOGN, "SLOT_VOICE too short for AMBE: %d bytes", len); return; }
 
-        dmr_bit raw[152]; dmr_bytes_to_bits(data + 33, 19, raw);
+        dmr_bit raw[152]; dmr_bytes_to_bits(data + GV_AMBE_OFF, 19, raw);
         dmr_bit a1_72[72], a2_72[72], a3_72[72];
-        dmr_ambe_49_to_72(raw + 0,   a1_72);
-        dmr_ambe_49_to_72(raw + 50,  a2_72);
-        dmr_ambe_49_to_72(raw + 100, a3_72);
-        /* Talker Alias relay: this specific IPSC frame's own burst-E (data[32]==
-         * GV_BE_FLAG) may carry a TA header/block instead of the call's GVCU LC —
-         * that 9-byte LC is a one-superframe side channel, not call identity.
-         * Encode it the same way the real LC is encoded and substitute only the
-         * burst-E EMB fragment of the outgoing frame; out_emb[ts]/out_lc[ts] (the
-         * persisted call identity) are never written here. */
+        dmr_bit *a72[3] = {a1_72, a2_72, a3_72};
+        int bad[3] = {data[GV_CTRL_OFF] & GV_CTRL_BAD1, raw[GV_BAD2_BIT], raw[GV_BAD3_BIT]};
+        for (int i = 0; i < 3; i++) {
+            if (bad[i]) dmr_bytes_to_bits(AMBE_SILENCE_MMDVM, 9, a72[i]);
+            else        dmr_ambe_49_to_72(raw + 50 * i, a72[i]);
+        }
+        if (bad[0] || bad[1] || bad[2])
+            LOGD(LOGN, "IPSC bad AMBE ts=%d flags=%d%d%d — sent as silence", ts, bad[0], bad[1], bad[2]);
+        /* Talker Alias relay: this specific IPSC frame's own burst-E (embedded LC
+         * present and passing its check) may carry a TA header/block instead of
+         * the call's GVCU LC — that 9-byte LC is a one-superframe side channel,
+         * not call identity. Encode it the same way the real LC is encoded and
+         * substitute only the burst-E EMB fragment of the outgoing frame;
+         * out_emb[ts]/out_lc[ts] (the persisted call identity) are never written
+         * here. */
         uint8_t ta_frag[4][4];
         const uint8_t *ta_override = NULL;
         int is_ta_superframe = 0;
-        if (len > GV_BE_LC_FLCO_OFF + 9 && data[32] == GV_BE_FLAG) {
+        if (len > GV_BE_LC_FLCO_OFF + 9 &&
+            (data[GV_CTRL_OFF] & (GV_CTRL_EMB_LC | GV_CTRL_LC_ERR)) == GV_CTRL_EMB_LC) {
             uint8_t be_flco = data[GV_BE_LC_FLCO_OFF];
             if (be_flco >= FLCO_TA_HEADER && be_flco <= FLCO_TA_BLOCK3) {
                 uint8_t ta_lc[9];
@@ -599,6 +615,7 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
                      ts, be_flco, ta_text);
             }
         }
+        if (data[GV_CTRL_OFF] & GV_CTRL_SYNC) tr->out_frame_pos[ts] = 0;   /* burst A: re-sync superframe */
         int pos = tr->out_frame_pos[ts] % 6;
         tr->out_frame_pos[ts]++;
         int frame_flags = flags | ((pos == 0) ? HBPF_FRAMETYPE_VOICESYNC : (HBPF_FRAMETYPE_VOICE | pos));

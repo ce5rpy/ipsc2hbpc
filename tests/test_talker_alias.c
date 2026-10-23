@@ -59,8 +59,8 @@ enum { TEST_SRC = 3120001, TEST_DST = 91, TEST_TS = 1 };
 /* Build one fake IPSC GROUP_VOICE burst. seq is just a wire token (not a call
  * boundary, per ae6a7b2). ta_text, when non-NULL, must be exactly 6 chars —
  * writes a fabricated TA_HEADER LC (FLCO 0x04) into the burst-E position
- * (data[32]=GV_BE_FLAG, data[56..64]=LC). Returns the frame length. */
-static int build_frame(uint8_t *out, int burst_type, int seq, const char *ta_text)
+ * (data[32]=ctrl, data[56..64]=LC). Returns the frame length. */
+static int build_frame(uint8_t *out, int burst_type, int seq, const char *ta_text, uint8_t ctrl)
 {
     memset(out, 0, 66);
     out[0] = GROUP_VOICE;
@@ -79,7 +79,7 @@ static int build_frame(uint8_t *out, int burst_type, int seq, const char *ta_tex
     /* SLOT1_VOICE: bytes 31-49 = AMBE (left zero, no audio content) */
     if (!ta_text) return 52;
 
-    out[32] = GV_BE_FLAG;
+    out[32] = ctrl;
     out[GV_BE_LC_FLCO_OFF]     = FLCO_TA_HEADER;
     out[GV_BE_LC_FLCO_OFF + 1] = 0x00;                                  /* FID */
     out[GV_BE_LC_FLCO_OFF + 2] = (uint8_t)((2 << 6) | (int)strlen(ta_text)); /* format=2, declen */
@@ -100,29 +100,26 @@ static void expected_embed(const uint8_t ta_lc[9], int pos, dmr_bit out[48])
     memcpy(out + 40, DMR_EMB[idx] + 8, 8);
 }
 
-int main(void)
+/* Burst E control byte ctrl; want_ta = whether its TA LC must be relayed. */
+static int run_case(const Config *cfg, ev_loop *loop, uint8_t ctrl, int want_ta)
 {
-    Config cfg; char err[4096];
-    if (config_load("tests/parity.toml", &cfg, err, sizeof err)) {
-        fprintf(stderr, "config: %s\n", err); return 2;
-    }
-    ev_loop *loop = ev_new();
-    translator *tr = translator_new(&cfg, loop);
+    translator *tr = translator_new(cfg, loop);
     translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
+    ncap = 0;
 
     uint8_t raw[66];
     int n, seq = 1;
 
-    n = build_frame(raw, VOICE_HEAD, seq++, NULL);
+    n = build_frame(raw, VOICE_HEAD, seq++, NULL, 0);
     translator_ipsc_voice_received(tr, raw, n, TEST_TS, VOICE_HEAD);
 
     for (int i = 0; i < 4; i++) {
-        n = build_frame(raw, SLOT1_VOICE, seq++, NULL);
+        n = build_frame(raw, SLOT1_VOICE, seq++, NULL, 0);
         translator_ipsc_voice_received(tr, raw, n, TEST_TS, SLOT1_VOICE);
     }
 
     uint8_t ta_lc[9];
-    n = build_frame(raw, SLOT1_VOICE, seq++, "TESTLB");
+    n = build_frame(raw, SLOT1_VOICE, seq++, "TESTLB", ctrl);
     memcpy(ta_lc, raw + GV_BE_LC_FLCO_OFF, 9);
     translator_ipsc_voice_received(tr, raw, n, TEST_TS, SLOT1_VOICE);
 
@@ -167,8 +164,14 @@ int main(void)
             dmr_bit want_embed[48];
             expected_embed(ta_lc, pos, want_embed);
 
-            if (memcmp(got_embed, want_embed, sizeof want_embed) != 0) {
-                fprintf(stderr, "FAIL: pos=%d EMB does not match reinjected Talker Alias LC fragment\n", pos);
+            int is_ta = memcmp(got_embed, want_embed, sizeof want_embed) == 0;
+            if (!want_ta) {
+                if (is_ta) {
+                    fprintf(stderr, "FAIL: ctrl=0x%02x pos=%d relayed a Talker Alias LC that failed its check\n", ctrl, pos);
+                    fails++;
+                }
+            } else if (!is_ta) {
+                fprintf(stderr, "FAIL: ctrl=0x%02x pos=%d EMB does not match reinjected Talker Alias LC fragment\n", ctrl, pos);
                 fprintf(stderr, "  got:  "); for (int i=0;i<48;i++) fprintf(stderr,"%d",got_embed[i]); fprintf(stderr,"\n");
                 fprintf(stderr, "  want: "); for (int i=0;i<48;i++) fprintf(stderr,"%d",want_embed[i]); fprintf(stderr,"\n");
                 fails++;
@@ -176,8 +179,21 @@ int main(void)
         }
     }
 
-    printf("Talker Alias relay (IPSC->HBP): %d failures\n", fails);
+    translator_free(tr);
+    return fails;
+}
 
-    translator_free(tr); ev_free(loop);
+int main(void)
+{
+    Config cfg; char err[4096];
+    if (config_load("tests/parity.toml", &cfg, err, sizeof err)) {
+        fprintf(stderr, "config: %s\n", err); return 2;
+    }
+    ev_loop *loop = ev_new();
+    int fails = run_case(&cfg, loop, GV_BE_FLAG, 1)
+              + run_case(&cfg, loop, GV_CTRL_EMB_LC | 0x06 | GV_CTRL_BAD1, 1)
+              + run_case(&cfg, loop, GV_CTRL_LC_ERR | GV_BE_FLAG, 0);
+    printf("Talker Alias relay (IPSC->HBP): %d failures\n", fails);
+    ev_free(loop);
     return fails ? 1 : 0;
 }

@@ -40,6 +40,7 @@
 #define VOICE_TERM  0x02
 #define SLOT1_VOICE 0x0A
 #define SLOT2_VOICE 0x8A
+#define SYNC_UNDETECT 0x13 /* repeater lost this burst (no sync): 34-byte placeholder, TS in bit 7 */
 
 /* GROUP_VOICE byte 17 (call_info) masks */
 #define TS_CALL_MSK 0x20   /* bit 5: 1=TS2 */
@@ -57,7 +58,16 @@
 #define GV_BURST_TYPE_OFF 30
 #define GV_PAYLOAD_OFF    31
 #define GV_MIN_LEN        31
-#define GV_BE_FLAG        0x16 /* data[32] value identifying burst E (carries reassembled LC repeat) */
+/* Voice burst control byte (data[32]); bit names after node-dmr-lib DMRVoicePayload. */
+#define GV_CTRL_OFF       32
+#define GV_CTRL_LC_ERR    0x80 /* embedded LC failed its check (burst E LC is corrupt) */
+#define GV_CTRL_SYNC      0x40 /* burst carries voice sync (burst A) */
+#define GV_CTRL_EMB_LC    0x10 /* reassembled embedded LC present (burst E) */
+#define GV_CTRL_BAD1      0x01 /* AMBE frame 1 uncorrectable on RF receive */
+#define GV_AMBE_OFF       33   /* 19-byte AMBE field: three 49-bit frames at bits 0, 50, 100 */
+#define GV_BAD2_BIT       49   /* AMBE field bit: frame 2 uncorrectable */
+#define GV_BAD3_BIT       99   /* AMBE field bit: frame 3 uncorrectable */
+#define GV_BE_FLAG        0x16 /* data[32] of a clean burst E as a repeater sends it */
 #define GV_BE_LC_FLCO_OFF 56   /* FLCO of the reassembled LC repeat carried only on burst E (9 bytes:
                                   FLCO+FID+SVC_OPT+DST(3)+SRC(3), same layout for GVCU and TA/GPS) */
 #define GV_BE_DST_OFF     (GV_BE_LC_FLCO_OFF + 3)   /* dst field / TA text bytes 1-3 */
