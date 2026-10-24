@@ -32,6 +32,18 @@ static char *trimcpy(char *dst, size_t cap, const char *src) {
     return dst;
 }
 
+/* BrandMeister NAKs an RPTC whose software id does not start with a YYYYMMDD
+ * date (DMRGateway sends its release date); default to the build date. */
+static void dated_software_id(char *out, size_t cap)
+{
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    const char *d = __DATE__; /* "Mmm dd yyyy" */
+    char mon[4] = {d[0], d[1], d[2], '\0'};
+    int month = (int)(strstr(months, mon) - months) / 3 + 1;
+    int day = (d[4] == ' ' ? 0 : d[4] - '0') * 10 + (d[5] - '0');
+    snprintf(out, cap, "%.4s%02d%02d_ipsc2hbp", d + 7, month, day);
+}
+
 /* get_str: returns 1 if present (out filled, stripped), 0 if absent/invalid. */
 static int get_str(const toml *t, errbag *e, const char *sec, const char *key,
                    int required, const char *deflt, char *out, size_t cap) {
@@ -311,7 +323,8 @@ int config_load(const char *path, Config *cfg, char *err, size_t errlen)
     get_str(t, &e, "hbp", "location",    0, "",          cfg->location,    sizeof cfg->location);
     get_str(t, &e, "hbp", "description", 0, "",          cfg->description, sizeof cfg->description);
     get_str(t, &e, "hbp", "url",         0, "",          cfg->url,         sizeof cfg->url);
-    get_str(t, &e, "hbp", "software_id", 0, "ipsc2hbp",  cfg->software_id, sizeof cfg->software_id);
+    { char sw[32]; dated_software_id(sw, sizeof sw);
+      get_str(t, &e, "hbp", "software_id", 0, sw,          cfg->software_id, sizeof cfg->software_id); }
     get_str(t, &e, "hbp", "package_id",  0, "MMDVM_IPSC2Net", cfg->package_id,  sizeof cfg->package_id);
 
     toml_free(t);

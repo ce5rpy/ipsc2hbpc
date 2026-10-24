@@ -165,6 +165,13 @@ int main(void)
         for (int i = 55; i < 58; i++) if (buf[i] < '0' || buf[i] > '9') ok = 0;
         if (!ok) { fprintf(stderr, "FAIL: RPTC numeric fields not zero-padded: %.50s\n", (char *)buf + 8); fails++; }
     }
+    /* Default software_id (fixture sets none): YYYYMMDD date first, or BrandMeister NAKs. */
+    checks++;
+    if (n == RPTC_LEN) {
+        int ok = memcmp(buf + 230, "_ipsc2hbp ", 10) == 0;
+        for (int i = 222; i < 230; i++) if (buf[i] < '0' || buf[i] > '9') ok = 0;
+        if (!ok) { fprintf(stderr, "FAIL: RPTC software_id not '<YYYYMMDD>_ipsc2hbp': %.20s\n", (char *)buf + 222); fails++; }
+    }
 
     /* 5. RPTACK -> CONNECTED (test fixture has no options, so no RPTO step). */
     udp_sendto(fake_fd, rptack2, 10, cfg.hbp_bind_ip, cfg.hbp_bind_port);

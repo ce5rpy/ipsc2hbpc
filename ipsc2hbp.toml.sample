@@ -298,5 +298,7 @@ height      = "10"          # antenna height above ground, metres, up to 3 digit
 location    = "Smalltown KS"
 description = "IPSC-HBP Bridge"
 url         = ""
-software_id = "ipsc2hbp"
+# software_id: omit to send "<build date>_ipsc2hbp". BrandMeister NAKs a value
+# that does not start with a YYYYMMDD date.
+# software_id = "20261023_ipsc2hbp"
 package_id  = "MMDVM_IPSC2Net" # BrandMeister NAKs the RPTC with other values (e.g. "duplex")

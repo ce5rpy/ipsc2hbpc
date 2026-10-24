@@ -171,6 +171,9 @@ static void on_rptack(hbp *hb, const uint8_t *d, int len)
         hb->state = ST_CONFIG_SENT;
         arm_login_timer(hb);
         LOGI(LOGN, "HBP: <- RPTACK(auth)  -> RPTC (%d bytes)", n);
+        if (strspn(hb->cfg->software_id, "0123456789") < 8)
+            LOGW(LOGN, "HBP: software_id \"%s\" does not start with a YYYYMMDD date -- "
+                 "BrandMeister NAKs that RPTC", hb->cfg->software_id);
     } else if (hb->state == ST_CONFIG_SENT) {
         if (hb->cfg->options[0]) {
             /* Variable-length, unpadded: the server reads the rest of the
