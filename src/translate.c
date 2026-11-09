@@ -188,13 +188,13 @@ static void extract_emb_fragment(const uint8_t payload33[33], uint8_t out4[4])
 }
 
 /* build the 23-byte VOICE_HEAD/VOICE_TERM payload (after burst-type byte) */
-static void build_ipsc_voice_payload(const uint8_t lc[9], int burst_type, uint8_t out[23])
+static void build_ipsc_voice_payload(const uint8_t lc[9], int burst_type, int ts, uint8_t out[23])
 {
     uint8_t fec[3];
     dmr_rs129_lc_encode(lc, burst_type == VOICE_TERM ? 1 : 0, fec);
     uint8_t tag = (burst_type == VOICE_HEAD) ? 0x11 : 0x12;
     int p = 0;
-    out[p++] = 0x80;
+    out[p++] = (ts == 2) ? GV_PDU_SLOT_MSK : 0x00;
     out[p++] = 0x00; out[p++] = 0x0a;   /* length_to_follow = 10 */
     out[p++] = 0x80;
     out[p++] = 0x0a;
@@ -818,7 +818,7 @@ static void emit_term(translator *tr, int ts)
     const uint8_t *lc = tr->in_lc[ts];
     int call_info = ((ts == 2) ? TS_CALL_MSK : 0x00) | END_MSK;
     uint8_t gv_payload[24]; gv_payload[0]=VOICE_TERM;
-    build_ipsc_voice_payload(lc, VOICE_TERM, gv_payload+1);
+    build_ipsc_voice_payload(lc, VOICE_TERM, ts, gv_payload+1);
     emit_in(tr, ts, lc, call_info, 0x5e, gv_payload, 24, 0);
     LOGI(LOGN, "HBP call end:   src=%u  %s=%u  ts=%d  ipsc_id=0x%02x",
          (unsigned)(lc[6]<<16|lc[7]<<8|lc[8]),
@@ -876,7 +876,7 @@ static void on_stream_timeout(translator *tr, int ts)
 void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
 {
     if (!ipsc_has_peers(tr->ip)) return;
-    if (len < DMRD_LEN) return;
+    if (len < DMRD_CORE_LEN) return;
 
     const uint8_t *src_sub = dmrd + DMRD_SRC_OFF;
     const uint8_t *dst_id  = dmrd + DMRD_DST_OFF;
@@ -929,7 +929,7 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
         {
             int call_info = (ts == 2) ? TS_CALL_MSK : 0x00;
             uint8_t gv_payload[24]; gv_payload[0]=VOICE_HEAD;
-            build_ipsc_voice_payload(lc, VOICE_HEAD, gv_payload+1);
+            build_ipsc_voice_payload(lc, VOICE_HEAD, ts, gv_payload+1);
             emit_in(tr, ts, lc, call_info, 0xdd, gv_payload, 24, 0);
         }
         return;
