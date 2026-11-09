@@ -303,6 +303,9 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
          * reply (see become_connected_no_handshake()), just log it plainly
          * instead of falling into "unknown packet". */
         LOGD(LOGN, "HBP: <- DMRP");
+    } else if ((n >= 7 && memcmp(buf, "RPTSBKN", 7) == 0) || (n == 4 && memcmp(buf, "DMRB", 4) == 0)) {
+        /* Network beacon request (old/new DMRGateway): MMDVMHost keys a beacon on RF; an IPSC repeater runs its own. */
+        LOGD(LOGN, "HBP: <- %.*s beacon request, ignored", n == 4 ? 4 : 7, (const char *)buf);
     } else {
         LOGD(LOGN, "HBP: unknown packet len=%d", n);
     }
