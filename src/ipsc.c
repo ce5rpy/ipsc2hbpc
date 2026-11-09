@@ -648,6 +648,20 @@ static void peer_keepalive_cb(ev_loop *loop, void *ud)
     ip->ka_timer = ev_timer_after(loop, ip->cfg->keepalive_interval, peer_keepalive_cb, ip);
 }
 
+/* Not translated yet: logged whole so captures of ARS/LRRP/TMS can be read from the log. */
+static void log_data_packet(const uint8_t *d, int n, const char *host, int port)
+{
+    const char *kind = (d[0] == PVT_DATA) ? "PVT_DATA" : "GROUP_DATA";
+    if (n < GV_MIN_LEN) {
+        LOGD(LOGN, "%s len=%d from %s:%d — not relayed  raw=%s", kind, n, host, port, log_hex(d, n));
+        return;
+    }
+    int call_info = d[GV_CALL_INFO_OFF];
+    LOGD(LOGN, "%s len=%d src=%u dst=%u ts=%d end=%d from %s:%d — not relayed  raw=%s",
+         kind, n, (unsigned)(d[6] << 16 | d[7] << 8 | d[8]), (unsigned)(d[9] << 16 | d[10] << 8 | d[11]),
+         (call_info & TS_CALL_MSK) ? 2 : 1, !!(call_info & END_MSK), host, port, log_hex(d, n));
+}
+
 /* ---------------- recv dispatch ---------------- */
 
 static void recv_cb(ev_loop *loop, int fd, void *ud)
@@ -686,8 +700,7 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
             case DE_REG_REQ:       master_de_reg_req(ip, buf, n, host, port); break;
             case GROUP_VOICE:
             case PVT_VOICE:        on_ipsc_voice(ip, buf, n, host, port, 0); break;
-            case GROUP_DATA: case PVT_DATA:
-                LOGD(LOGN, "Data packet 0x%02x from %s:%d — ignored", opcode, host, port); break;
+            case GROUP_DATA: case PVT_DATA: log_data_packet(buf, n, host, port); break;
             case REPEATER_BLOCKED: LOGD(LOGN, "REPEATER_BLOCKED from %s:%d", host, port); break;
             case CALL_INTERRUPT_REQ: LOGD(LOGN, "CALL_INTERRUPT_REQ from %s:%d", host, port); break;
             case OPCODE_0xF0:      LOGD(LOGN, "0xF0 from %s:%d — observed, benign, no response sent", host, port); break;
@@ -726,8 +739,7 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
                                           host, port, n, log_hex(buf, n)); break;
             case SYSTEM_MAP_REQ:     LOGI(LOGN, "SYSTEM_MAP_REQ (0x9C) from master %s:%d len=%d raw=%s",
                                           host, port, n, log_hex(buf, n)); break;
-            case GROUP_DATA: case PVT_DATA:
-                LOGD(LOGN, "Data packet 0x%02x from %s:%d — ignored", opcode, host, port); break;
+            case GROUP_DATA: case PVT_DATA: log_data_packet(buf, n, host, port); break;
             case CALL_CONFIRMATION: case TXT_MESSAGE_ACK: case CALL_MON_STATUS: case CALL_MON_RPT:
             case REPEATER_BLOCKED: case RPT_WAKE_UP: case CALL_INTERRUPT_REQ:
             case DE_REG_REPLY: case UNKNOWN_9E: case WIRELINE: case REMOTE_PROG_REQ:
