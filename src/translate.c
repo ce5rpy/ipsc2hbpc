@@ -48,23 +48,15 @@ struct translator {
     int      out_has_emb[3];
     uint8_t  out_emb[3][4][4];
 
-    /* Talker Alias relay (IPSC -> HBP): IPSC only ever reveals the current
-     * superframe's full 9-byte LC (GVCU or TA) once, on the burst-E frame —
-     * confirmed against captures (2026-07-23): the other embedded-LC-bearing
-     * positions (B,C,D) carry no LC information of their own over IPSC at
-     * all, just AMBE. By the time burst E arrives, B/C/D of the SAME
-     * superframe have already been decided — so they are held here (AMBE
-     * bits + assigned seq/flags, not yet sent) until E is known, so a TA
-     * superframe can be relayed with all 4 embedded fragments (B,C,D,E)
-     * self-consistent instead of only patching E while B/C/D still carry
-     * the stale call LC (which real receivers silently discard). */
-    struct {
-        dmr_bit a1_72[72], a2_72[72], a3_72[72];
-        int     flags;
-        int     pos;
-        uint8_t seq;
-    } out_bcd[3][3];
-    int      out_bcd_n[3];
+    /* Talker Alias relay (IPSC -> HBP): IPSC reveals a superframe's 9-byte LC only on
+     * its burst E, after B-D are out with the call's LC.  An alias LC is queued and a
+     * later superframe carries it whole, as DMRGateway's rewrite delays embedded data
+     * one superframe: holding B-D for their own E lost the alias whenever RF dropped
+     * bursts before it, and a radio sends each alias block once per transmission. */
+    uint8_t  out_ta_queue[3][TA_QUEUE][9];
+    int      out_ta_queued[3];
+    int      out_sf_alias[3];         /* this outgoing superframe carries out_sf_frag */
+    uint8_t  out_sf_frag[3][4][4];
 
     int      out_ts_mismatch_warned[3];
     double   out_last_pkt[3];
@@ -115,7 +107,7 @@ struct translator {
 static void deliver_slot(translator *tr, int ts);
 static void on_stream_timeout(translator *tr, int ts);
 static void arm_delivery(translator *tr, int ts);
-static void flush_pending_bcd(translator *tr, int ts);
+static void out_reset_call(translator *tr, int ts);
 
 static void delivery_timer_cb(ev_loop *loop, void *ud)
 {
@@ -208,23 +200,15 @@ static void build_ipsc_voice_payload(const uint8_t lc[9], int burst_type, int ts
     out[p++] = 0x00; out[p++] = tag; out[p++] = 0x00; out[p++] = 0x00;
 }
 
-/* 48-bit EMBED for superframe position 0..5.  ta_override, when non-NULL, is
- * the 4-byte fragment (from dmr_encode_emblc()) matching THIS position (B/C/D/
- * E, pos 1..4) — used to relay a Talker Alias / GPS block without touching
- * the call's persisted identity (tr->out_emb[ts]).  Callers are expected to
- * pass the fragment for pos specifically (ta_frag[pos-1]), not always the
- * burst-E one — see translator_ipsc_voice_received's B/C/D replay. Ignored at
- * pos 0 (sync) and pos 5 (F), which never carry embedded-LC fragments. */
-static void build_embed(translator *tr, int ts, int pos, dmr_bit embed[48], const uint8_t *ta_override)
+/* 48-bit EMBED for superframe position 0..5.  frag, when non-NULL, is this position's
+ * fragment of an alias LC (dmr_encode_emblc()), used instead of the call's own. */
+static void build_embed(translator *tr, int ts, int pos, dmr_bit embed[48], const uint8_t *frag)
 {
     if (pos == 0) { memcpy(embed, DMR_BS_VOICE_SYNC, 48); return; }
     int idx = pos - 1;   /* BURST_B..F */
     memcpy(embed, DMR_EMB[idx], 8);
-    if (pos <= 4 && ta_override) {
-        /* ta_override is always the fragment matching THIS position (B/C/D/E),
-         * whether this is the frame IPSC itself flagged (E) or one of the
-         * buffered B/C/D frames replayed once E resolved the superframe. */
-        dmr_bytes_to_bits(ta_override, 4, embed + 8);
+    if (pos <= 4 && frag) {
+        dmr_bytes_to_bits(frag, 4, embed + 8);
     } else if (pos <= 4 && tr->out_has_emb[ts]) {
         dmr_bytes_to_bits(tr->out_emb[ts][pos - 1], 4, embed + 8);  /* 32 bits */
     } else {
@@ -326,11 +310,7 @@ static void cancel_delivery_timer(translator *tr, int ts)
 
 static void init_call_state(translator *tr)
 {
-    for (int ts = 1; ts <= 2; ts++) { cancel_delivery_timer(tr, ts); flush_pending_bcd(tr, ts); }
-    memset(tr->out_has_stream, 0, sizeof tr->out_has_stream);
-    tr->out_ipsc_stream_id[1]=tr->out_ipsc_stream_id[2]=-1;
-    memset(tr->out_has_lc, 0, sizeof tr->out_has_lc);
-    memset(tr->out_has_emb, 0, sizeof tr->out_has_emb);
+    for (int ts = 1; ts <= 2; ts++) { cancel_delivery_timer(tr, ts); out_reset_call(tr, ts); }
     tr->out_last_pkt[1]=tr->out_last_pkt[2]=0.0;
     tr->out_has_rtp[1]=tr->out_has_rtp[2]=0;
     tr->out_ts_mismatch_warned[1]=tr->out_ts_mismatch_warned[2]=0;
@@ -370,11 +350,12 @@ void translator_hbp_disconnected(translator *tr) { LOGW(LOGN, "HBP disconnected"
 /* Clear all IPSC->HBP per-call state for a timeslot. */
 static void out_reset_call(translator *tr, int ts)
 {
-    flush_pending_bcd(tr, ts);
     tr->out_has_stream[ts]     = 0;
     tr->out_ipsc_stream_id[ts] = -1;
     tr->out_has_lc[ts]         = 0;
     tr->out_has_emb[ts]        = 0;
+    tr->out_ta_queued[ts]      = 0;
+    tr->out_sf_alias[ts]       = 0;
 }
 
 /* True if the current IPSC voice frame continues the active out-call.  Replaces
@@ -394,9 +375,7 @@ static int out_call_continues(uint32_t rtp_now, int has_rtp, uint32_t prev_rtp, 
 }
 
 /* Build one outgoing DMRD SLOT_VOICE frame from already-decoded AMBE + a
- * resolved 48-bit EMB and send it. Shared by the immediate (A/E/F) and the
- * deferred (buffered B/C/D, once E resolves whether this superframe is TA)
- * paths so both build frames identically. */
+ * resolved 48-bit EMB and send it. */
 static void emit_slot_frame(translator *tr, int ts, const dmr_bit a1_72[72],
                             const dmr_bit a2_72[72], const dmr_bit a3_72[72],
                             const dmr_bit embed[48], int flags, uint8_t seq)
@@ -426,23 +405,6 @@ static void emit_slot_frame(translator *tr, int ts, const dmr_bit a1_72[72],
     memcpy(dmrd+p, payload_33, 33); p += 33;
     dmrd[p++] = 0x00; dmrd[p++] = 0x00;   /* BER + RSSI */
     hbp_send_dmrd(tr->hb, dmrd, p);
-}
-
-/* Send whatever B/C/D frames are still held (superframe abandoned by a call
- * end/reset/restart before E ever arrived to resolve them) using the call's
- * normal embedded LC — best effort, so buffered audio is never silently
- * dropped. Normal (non-TA) superframes never reach here with anything
- * pending: E always arrives and flushes them first. */
-static void flush_pending_bcd(translator *tr, int ts)
-{
-    for (int i = 0; i < tr->out_bcd_n[ts]; i++) {
-        dmr_bit embed[48];
-        build_embed(tr, ts, tr->out_bcd[ts][i].pos, embed, NULL);
-        emit_slot_frame(tr, ts, tr->out_bcd[ts][i].a1_72, tr->out_bcd[ts][i].a2_72,
-                         tr->out_bcd[ts][i].a3_72, embed, tr->out_bcd[ts][i].flags,
-                         tr->out_bcd[ts][i].seq);
-    }
-    tr->out_bcd_n[ts] = 0;
 }
 
 void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len, int ts, int burst_type)
@@ -498,9 +460,7 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
             LOGW(LOGN, "IPSC stream ID changed on ts=%d (0x%02x->0x%02x) at VOICE_HEAD "
                        "— prior call ended without VOICE_TERM, clearing stale state",
                  ts, tr->out_ipsc_stream_id[ts], ipsc_stream_id);
-            flush_pending_bcd(tr, ts);
-            tr->out_has_stream[ts]=0; tr->out_ipsc_stream_id[ts]=-1;
-            tr->out_has_lc[ts]=0; tr->out_has_emb[ts]=0;
+            out_reset_call(tr, ts);
         }
         if (!tr->out_has_stream[ts]) {
             rand4(tr->out_stream_id[ts]);
@@ -530,7 +490,6 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
         flags |= HBPF_FRAMETYPE_DATASYNC | HBPF_SLT_VHEAD;
     } else if (burst_type == VOICE_TERM) {
         if (!tr->out_has_stream[ts]) return;
-        flush_pending_bcd(tr, ts);   /* B/C/D must reach HBP before the terminator */
         uint8_t lc[9];
         if (tr->out_has_lc[ts]) memcpy(lc, tr->out_lc[ts], 9);
         else fill_voice_lc(lc, is_private, dst_id, src_sub);
@@ -598,79 +557,42 @@ void translator_ipsc_voice_received(translator *tr, const uint8_t *data, int len
         }
         if (bad[0] || bad[1] || bad[2])
             LOGD(LOGN, "IPSC bad AMBE ts=%d flags=%d%d%d — sent as silence", ts, bad[0], bad[1], bad[2]);
-        /* Talker Alias relay: this specific IPSC frame's own burst-E (embedded LC
-         * present and passing its check) may carry a TA header/block instead of
-         * the call's GVCU LC — that 9-byte LC is a one-superframe side channel,
-         * not call identity. Encode it the same way the real LC is encoded and
-         * substitute only the burst-E EMB fragment of the outgoing frame;
-         * out_emb[ts]/out_lc[ts] (the persisted call identity) are never written
-         * here. */
-        uint8_t ta_frag[4][4];
-        const uint8_t *ta_override = NULL;
-        int is_ta_superframe = 0;
-        if (len > GV_BE_LC_FLCO_OFF + 9 &&
-            (data[GV_CTRL_OFF] & (GV_CTRL_EMB_LC | GV_CTRL_LC_ERR)) == GV_CTRL_EMB_LC) {
-            uint8_t be_flco = data[GV_BE_LC_FLCO_OFF];
-            if (be_flco >= FLCO_TA_HEADER && be_flco <= FLCO_TA_BLOCK3) {
-                uint8_t ta_lc[9];
-                memcpy(ta_lc, data + GV_BE_LC_FLCO_OFF, 9);
-                dmr_encode_emblc(ta_lc, ta_frag);
-                ta_override = ta_frag[3];   /* this frame's own (burst-E) fragment */
-                is_ta_superframe = 1;
-                char ta_text[8]; ta_lc_text(ta_lc, ta_text);
-                LOGD(LOGN, "IPSC Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" (burst E)",
-                     ts, be_flco, ta_text);
-            }
-        }
-        if (data[GV_CTRL_OFF] & GV_CTRL_SYNC) tr->out_frame_pos[ts] = 0;   /* burst A: re-sync superframe */
+        int ctrl = data[GV_CTRL_OFF];
+        /* A and E mark themselves.  A repeater drops bursts it lost on RF without a gap in
+         * the RTP sequence or timestamp, so counting alone shifts every later position. */
+        if (ctrl & GV_CTRL_SYNC) tr->out_frame_pos[ts] = 0;
+        else if (ctrl & GV_CTRL_EMB_LC) tr->out_frame_pos[ts] = 4;
         int pos = tr->out_frame_pos[ts] % 6;
         tr->out_frame_pos[ts]++;
         int frame_flags = flags | ((pos == 0) ? HBPF_FRAMETYPE_VOICESYNC : (HBPF_FRAMETYPE_VOICE | pos));
 
-        if (pos >= 1 && pos <= 3) {
-            /* B, C, D: IPSC never reveals this superframe's LC until burst E
-             * (confirmed against captures — B/C/D carry no LC info of their
-             * own, just AMBE). Hold them until E resolves whether this is a
-             * TA superframe, so all 4 embedded fragments end up
-             * self-consistent instead of only patching E. */
-            if (tr->out_bcd_n[ts] < 3) {
-                int i = tr->out_bcd_n[ts]++;
-                memcpy(tr->out_bcd[ts][i].a1_72, a1_72, sizeof a1_72);
-                memcpy(tr->out_bcd[ts][i].a2_72, a2_72, sizeof a2_72);
-                memcpy(tr->out_bcd[ts][i].a3_72, a3_72, sizeof a3_72);
-                tr->out_bcd[ts][i].flags = frame_flags;
-                tr->out_bcd[ts][i].pos   = pos;
-                tr->out_bcd[ts][i].seq   = (uint8_t)tr->out_seq;
-            } else {
-                LOGW(LOGN, "ts=%d: B/C/D buffer already full at pos=%d — dropping frame", ts, pos);
+        if (pos == 1) {   /* a superframe's fragments are chosen once, all from one LC */
+            tr->out_sf_alias[ts] = tr->out_ta_queued[ts] > 0;
+            if (tr->out_sf_alias[ts]) {
+                dmr_encode_emblc(tr->out_ta_queue[ts][0], tr->out_sf_frag[ts]);
+                memmove(tr->out_ta_queue[ts][0], tr->out_ta_queue[ts][1], (size_t)--tr->out_ta_queued[ts] * 9);
             }
-            tr->out_seq = (tr->out_seq + 1) & 0xFF;
-            return;
         }
-
-        if (pos == 0 && tr->out_bcd_n[ts] > 0) {
-            /* Defensive: the previous superframe's E never arrived (e.g. a
-             * dropped packet) — flush what's held under the call's normal LC
-             * rather than lose that audio. */
-            flush_pending_bcd(tr, ts);
-        }
-        if (pos == 4) {
-            /* E resolves the superframe: replay B/C/D now with the SAME LC
-             * (TA or normal) that E turned out to carry. */
-            for (int i = 0; i < tr->out_bcd_n[ts]; i++) {
-                dmr_bit e[48];
-                const uint8_t *ov = is_ta_superframe ? ta_frag[tr->out_bcd[ts][i].pos - 1] : NULL;
-                build_embed(tr, ts, tr->out_bcd[ts][i].pos, e, ov);
-                emit_slot_frame(tr, ts, tr->out_bcd[ts][i].a1_72, tr->out_bcd[ts][i].a2_72,
-                                 tr->out_bcd[ts][i].a3_72, e, tr->out_bcd[ts][i].flags,
-                                 tr->out_bcd[ts][i].seq);
-            }
-            tr->out_bcd_n[ts] = 0;
-        }
-
-        dmr_bit embed[48]; build_embed(tr, ts, pos, embed, ta_override);
+        const uint8_t *frag = (tr->out_sf_alias[ts] && pos >= 1 && pos <= 4) ? tr->out_sf_frag[ts][pos - 1] : NULL;
+        dmr_bit embed[48]; build_embed(tr, ts, pos, embed, frag);
         emit_slot_frame(tr, ts, a1_72, a2_72, a3_72, embed, frame_flags, (uint8_t)tr->out_seq);
         tr->out_seq = (tr->out_seq + 1) & 0xFF;
+
+        if (pos == 4) {
+            const uint8_t *be_lc = data + GV_BE_LC_FLCO_OFF;
+            if (len > GV_BE_LC_FLCO_OFF + 9 && (ctrl & (GV_CTRL_EMB_LC | GV_CTRL_LC_ERR)) == GV_CTRL_EMB_LC &&
+                be_lc[0] >= FLCO_TA_HEADER && be_lc[0] <= FLCO_TA_BLOCK3) {
+                char ta_text[8]; ta_lc_text(be_lc, ta_text);
+                if (tr->out_ta_queued[ts] < TA_QUEUE) {
+                    memcpy(tr->out_ta_queue[ts][tr->out_ta_queued[ts]++], be_lc, 9);
+                    LOGD(LOGN, "IPSC Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" (queued)",
+                         ts, be_lc[0], ta_text);
+                } else {
+                    LOGD(LOGN, "IPSC Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" dropped, queue full",
+                         ts, be_lc[0], ta_text);
+                }
+            }
+        }
         return;
     }
 

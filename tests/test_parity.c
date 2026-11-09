@@ -127,7 +127,7 @@ int main(void)
     translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
     ncap = 0;
     fi = fopen("tests/parity_in.txt", "r");
-    /* HEAD + bursts A-E: B/C/D are held until E, so feed through E to see B. */
+    /* HEAD + bursts A-E */
     for (int k = 0; k < 6 && fi && fgets(line, sizeof line, fi); k++) {
         int ts, bt; char hex[400];
         if (sscanf(line, "%d %d %399s", &ts, &bt, hex) != 3) continue;
