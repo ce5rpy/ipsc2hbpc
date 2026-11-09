@@ -13,7 +13,11 @@
 
 #define LOGN "translate.translator"
 
-#define MAX_SYNTH_BURSTS    6
+/* A network gap is filled with silence for up to 1.5 s before the call is ended, as
+ * MMDVMHost's network watchdog does: ended sooner, it came back without a header and the
+ * repeater kept its radios mute. */
+#define MAX_SYNTH_BURSTS    25
+#define LATE_ENTRY_HEADS    3    /* VOICE_HEADs before a call joined without one (MMDVMHost duplex) */
 #define TA_QUEUE            4    /* an alias is a header and up to three blocks */
 #define SLOT_MS             0.060
 
@@ -813,6 +817,14 @@ static void emit_in(translator *tr, int ts, const uint8_t *lc, int call_info,
     ipsc_send_voice(tr->ip, gv, n);
 }
 
+static void emit_head(translator *tr, int ts, const uint8_t lc[9])
+{
+    int call_info = (ts == 2) ? TS_CALL_MSK : 0x00;
+    uint8_t gv_payload[24]; gv_payload[0]=VOICE_HEAD;
+    build_ipsc_voice_payload(lc, VOICE_HEAD, ts, gv_payload+1);
+    emit_in(tr, ts, lc, call_info, 0xdd, gv_payload, 24, 0);
+}
+
 static void emit_term(translator *tr, int ts)
 {
     const uint8_t *lc = tr->in_lc[ts];
@@ -926,12 +938,7 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
         dmr_encode_emblc(lc, tr->in_emb[ts]); tr->in_has_emb[ts]=1;
         /* Forward the header immediately — preserves the source's header spacing
          * exactly and keeps the header out of the voice delivery clock. */
-        {
-            int call_info = (ts == 2) ? TS_CALL_MSK : 0x00;
-            uint8_t gv_payload[24]; gv_payload[0]=VOICE_HEAD;
-            build_ipsc_voice_payload(lc, VOICE_HEAD, ts, gv_payload+1);
-            emit_in(tr, ts, lc, call_info, 0xdd, gv_payload, 24, 0);
-        }
+        emit_head(tr, ts, lc);
         return;
     }
 
@@ -965,6 +972,12 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
         clear_in_call(tr, ts);
     }
     if (!tr->in_has_lc[ts]) {
+        /* Joined without a header (midway, or back after a gap that ended the call): as
+         * MMDVMHost does, start on burst A, behind headers built from the stream's LC. */
+        if (frame_type != HBPF_FRAMETYPE_VOICESYNC) {
+            LOGD(LOGN, "HBP late entry ts=%d: burst %c dropped, waiting for burst A", ts, "ABCDEF"[dtype < 6 ? dtype : 5]);
+            return;
+        }
         uint8_t lc[9]; fill_voice_lc(lc, is_private, dst_id, src_sub);
         memcpy(tr->in_lc[ts], lc, 9); tr->in_has_lc[ts]=1;
         dmr_encode_emblc(lc, tr->in_emb[ts]); tr->in_has_emb[ts]=1;
@@ -976,6 +989,7 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
              ts, (unsigned)(src_sub[0]<<16|src_sub[1]<<8|src_sub[2]),
              is_private ? "dst" : "tg",
              (unsigned)(dst_id[0]<<16|dst_id[1]<<8|dst_id[2]), log_hex(hbp_stream, 4));
+        for (int i = 0; i < LATE_ENTRY_HEADS; i++) emit_head(tr, ts, lc);
     }
     int cur_pos;
     if (frame_type == HBPF_FRAMETYPE_VOICESYNC) cur_pos = 0;
@@ -1019,7 +1033,7 @@ void translator_check_call_timeouts(translator *tr)
     /* Dead-man cleanup for a lost VOICE_TERM with no follow-on call (a real new
      * call resets stale state inline via RTP discontinuity).  2 s keeps the
      * logged call-end close to reality; it sits well above every in-call wait
-     * (60 ms burst, 120 ms jitter, 360 ms synth).  Rides the ~5 s watchdog, so
+     * (60 ms burst, 120 ms jitter, 1.5 s synth).  Rides the ~5 s watchdog, so
      * effective clearing is ~2-7 s — fine for a dead-man. */
     double timeout = 2.0;
     double now = ev_now(tr->loop);
