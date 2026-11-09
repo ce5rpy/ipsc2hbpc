@@ -41,7 +41,8 @@ void hbp_activate(struct hbp *hb) { (void)hb; }
 void hbp_deactivate(struct hbp *hb) { (void)hb; }
 void hbp_send_dmrd(struct hbp *hb, const uint8_t *d, int n) { (void)hb; (void)d; (void)n; }
 
-enum { TEST_SRC = 3120001, TEST_DST = 91, TEST_TS = 1 };
+enum { TEST_SRC = 3120001, TEST_DST = 91 };
+static int test_ts = 1;
 static uint8_t STREAM_ID[4] = { 0x42, 0x7d, 0x91, 0x7f };
 
 static void put_bits_at(dmr_bit *fb, int off, const dmr_bit *src, int n)
@@ -94,7 +95,7 @@ static int build_dmrd(uint8_t *out, int seq, const uint8_t lc[9], int is_head, i
             put_bits_at(fb, 148, DMR_EMB[idx] + 8, 8);
         }
     }
-    if (TEST_TS == 2) out[DMRD_FLAGS_OFF] |= HBPF_TGID_TS2;
+    if (test_ts == 2) out[DMRD_FLAGS_OFF] |= HBPF_TGID_TS2;
 
     dmr_bits_to_bytes(fb, 264, out + DMRD_PAYLOAD_OFF);
     return DMRD_LEN;
@@ -105,13 +106,13 @@ static void stop_cb(ev_loop *loop, void *ud){ (void)ud; ev_stop(loop); }
 /* The frames a master would send, fed at its pace (one burst every 60 ms). */
 #define MAXFEED 64
 static uint8_t feed[MAXFEED][DMRD_LEN];
-static int nfeed, fed;
+static int nfeed, fed, feed_len = DMRD_LEN;
 static translator *TR;
 
 static void feed_cb(ev_loop *loop, void *ud)
 {
     (void)ud;
-    translator_hbp_voice_received(TR, feed[fed++], DMRD_LEN);
+    translator_hbp_voice_received(TR, feed[fed++], feed_len);
     if (fed < nfeed) ev_timer_after(loop, 0.060, feed_cb, NULL);
 }
 
@@ -214,6 +215,47 @@ int main(void)
 
     printf("Talker Alias relay (HBP->IPSC): %d checks, %d failures\n", checks, fails);
 
+    /* The calls above were on TS1: their VOICE_HEAD / VOICE_TERM say so (byte 31 bit 7). */
+    int call_fails = 0, call_checks = 0, heads = 0, terms = 0;
+    for (int i = 0; i < ngv; i++)
+        if (gvcap[i][30] == VOICE_HEAD || gvcap[i][30] == VOICE_TERM) {
+            heads += gvcap[i][30] == VOICE_HEAD;
+            terms += gvcap[i][30] == VOICE_TERM;
+            call_checks++;
+            if (gvcap[i][31] & GV_PDU_SLOT_MSK) {
+                fprintf(stderr, "FAIL: a TS1 %s is marked TS2\n", gvcap[i][30] == VOICE_HEAD ? "VOICE_HEAD" : "VOICE_TERM");
+                call_fails++;
+            }
+        }
+    call_checks++;
+    if (!heads || !terms) { fprintf(stderr, "FAIL: %d VOICE_HEAD and %d VOICE_TERM delivered\n", heads, terms); call_fails++; }
+
+    /* A TS2 call from a master sending 53-byte DMRD (no BER/RSSI, as HBlink3 does): it is
+     * delivered whole, and its VOICE_HEAD / VOICE_TERM are marked TS2. */
+    ngv = 0; nfeed = fed = 0; feed_len = DMRD_CORE_LEN; test_ts = 2; STREAM_ID[2] ^= 0xFF;
+    build_dmrd(feed[nfeed++], seq++, call_lc, 1, 0, 0, NULL);
+    for (int pos = 0; pos < 6; pos++)
+        build_dmrd(feed[nfeed++], seq++, call_lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? call_frag[pos - 1] : NULL);
+    build_dmrd(feed[nfeed++], seq++, call_lc, 0, 1, 0, NULL);
+    ev_timer_after(loop, 0.0, feed_cb, NULL);
+    ev_timer_after(loop, 1.5, stop_cb, loop);
+    ev_run(loop);
+    int voice = 0, ts2_heads = 0;
+    for (int i = 0; i < ngv; i++) {
+        if (gvcap[i][30] == SLOT2_VOICE) voice++;
+        if (gvcap[i][30] == VOICE_HEAD || gvcap[i][30] == VOICE_TERM) {
+            ts2_heads++;
+            call_checks++;
+            if (!(gvcap[i][31] & GV_PDU_SLOT_MSK)) { fprintf(stderr, "FAIL: a TS2 VOICE_HEAD/TERM is marked TS1\n"); call_fails++; }
+        }
+    }
+    call_checks++;
+    if (voice != 6 || ts2_heads != 2) {
+        fprintf(stderr, "FAIL: 53-byte DMRD call: %d voice bursts and %d head/term delivered, want 6 and 2\n", voice, ts2_heads);
+        call_fails++;
+    }
+    printf("HBP->IPSC call frames: %d checks, %d failures\n", call_checks, call_fails);
+
     translator_free(TR); ev_free(loop);
-    return fails ? 1 : 0;
+    return fails || call_fails ? 1 : 0;
 }

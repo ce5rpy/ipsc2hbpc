@@ -67,6 +67,7 @@
 #define GV_AMBE_OFF       33   /* 19-byte AMBE field: three 49-bit frames at bits 0, 50, 100 */
 #define GV_BAD2_BIT       49   /* AMBE field bit: frame 2 uncorrectable */
 #define GV_BAD3_BIT       99   /* AMBE field bit: frame 3 uncorrectable */
+#define GV_PDU_SLOT_MSK   0x80 /* VOICE_HEAD / VOICE_TERM byte 31 bit 7: timeslot 2 */
 #define GV_BE_FLAG        0x16 /* data[32] of a clean burst E as a repeater sends it */
 #define GV_BE_LC_FLCO_OFF 56   /* FLCO of the reassembled LC repeat carried only on burst E (9 bytes:
                                   FLCO+FID+SVC_OPT+DST(3)+SRC(3), same layout for GVCU and TA/GPS) */
