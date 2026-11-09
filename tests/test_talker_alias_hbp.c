@@ -106,6 +106,7 @@ static void stop_cb(ev_loop *loop, void *ud){ (void)ud; ev_stop(loop); }
 /* The frames a master would send, fed at its pace (one burst every 60 ms). */
 #define MAXFEED 64
 static uint8_t feed[MAXFEED][DMRD_LEN];
+static double feed_gap[MAXFEED];   /* extra silence on the wire before frame i */
 static int nfeed, fed, feed_len = DMRD_LEN;
 static translator *TR;
 
@@ -113,7 +114,47 @@ static void feed_cb(ev_loop *loop, void *ud)
 {
     (void)ud;
     translator_hbp_voice_received(TR, feed[fed++], feed_len);
-    if (fed < nfeed) ev_timer_after(loop, 0.060, feed_cb, NULL);
+    if (fed < nfeed) ev_timer_after(loop, 0.060 + feed_gap[fed], feed_cb, NULL);
+}
+
+/* One call on TS1: an optional header, nsf superframes (the first `skip` bursts not sent, as
+ * when a call is joined midway) with `gap` seconds of nothing on the wire before superframe
+ * `gap_at`, a terminator; played out, then the GV frames sent. */
+static void play_call(ev_loop *loop, const uint8_t lc[9], int head, int skip, int nsf, int gap_at, double gap)
+{
+    uint8_t frag[4][4];
+    int seq = 0;
+    dmr_encode_emblc(lc, frag);
+    ngv = 0; nfeed = fed = 0; feed_len = DMRD_LEN; test_ts = 1; STREAM_ID[1]++;
+    memset(feed_gap, 0, sizeof feed_gap);
+    if (head) build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
+    for (int k = 0; k < nsf; k++) {
+        if (k == gap_at) feed_gap[nfeed] = gap;
+        for (int pos = k ? 0 : skip; pos < 6; pos++)
+            build_dmrd(feed[nfeed++], seq++, lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? frag[pos - 1] : NULL);
+    }
+    build_dmrd(feed[nfeed++], seq++, lc, 0, 1, 0, NULL);
+    ev_timer_after(loop, 0.0, feed_cb, NULL);
+    ev_timer_after(loop, 0.5 + nsf * 0.36 + gap + 2.0, stop_cb, loop);
+    ev_run(loop);
+}
+
+/* VOICE_HEADs and VOICE_TERMs sent, how many headers came right before a voice burst A (a
+ * call's voice starts on burst A after its headers), and whether every frame kept the first
+ * one's IPSC stream id. */
+static void count_calls(int *heads, int *terms, int *heads_before_voice, int *one_stream)
+{
+    *heads = *terms = *heads_before_voice = 0;
+    *one_stream = 1;
+    for (int i = 0; i < ngv; i++) {
+        if (gvcap[i][30] == VOICE_HEAD) {
+            (*heads)++;
+            if (i + 1 < ngv && gvcap[i + 1][30] == SLOT1_VOICE && gvcap[i + 1][31] == 0x14 && gvcap[i + 1][32] == 0x40)
+                (*heads_before_voice)++;
+        }
+        if (gvcap[i][30] == VOICE_TERM) (*terms)++;
+        if (gvcap[i][5] != gvcap[0][5]) *one_stream = 0;
+    }
 }
 
 static int check_lc(const char *what, const uint8_t got[9], const uint8_t want[9])
@@ -256,6 +297,47 @@ int main(void)
     }
     printf("HBP->IPSC call frames: %d checks, %d failures\n", call_checks, call_fails);
 
+    /* Network gaps, as the master's path drops voice now and then. A repeater mutes a call it
+     * is told ended and then gets voice without a VOICE_HEAD, so, as MMDVMHost does: a gap
+     * under 1.5 s is silence within the call; a longer one ends it, and voice after it, like a
+     * call joined without its header, waits for burst A and is preceded by 3 VOICE_HEADs. */
+    int gap_fails = 0, gap_checks = 0, hv, one;
+    play_call(loop, call_lc, 1, 0, 4, 2, 1.0);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 1 || terms != 1 || !one) {
+        fprintf(stderr, "FAIL: a 1 s gap cut the call: %d VOICE_HEAD, %d VOICE_TERM, %s stream id\n",
+                heads, terms, one ? "one" : "more than one");
+        gap_fails++;
+    }
+    play_call(loop, call_lc, 0, 2, 2, -1, 0.0);   /* joined on burst C */
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 3 || hv != 1 || terms != 1) {
+        fprintf(stderr, "FAIL: a call joined without its header: %d VOICE_HEAD (%d before voice), %d VOICE_TERM\n",
+                heads, hv, terms);
+        gap_fails++;
+    }
+    for (int i = 0; i < ngv; i++)
+        if (gvcap[i][30] == VOICE_HEAD) {
+            gap_checks++;
+            unsigned src = (unsigned)(gvcap[i][6]<<16 | gvcap[i][7]<<8 | gvcap[i][8]);
+            unsigned dst = (unsigned)(gvcap[i][9]<<16 | gvcap[i][10]<<8 | gvcap[i][11]);
+            if (src != (unsigned)TEST_SRC || dst != (unsigned)TEST_DST) {
+                fprintf(stderr, "FAIL: late-entry VOICE_HEAD names src=%u dst=%u\n", src, dst);
+                gap_fails++;
+            }
+        }
+    play_call(loop, call_lc, 1, 0, 4, 2, 2.0);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 4 || hv != 2 || terms != 2) {
+        fprintf(stderr, "FAIL: a 2 s gap: %d VOICE_HEAD (%d before voice), %d VOICE_TERM, want 4, 2, 2\n",
+                heads, hv, terms);
+        gap_fails++;
+    }
+    printf("HBP->IPSC network gaps: %d checks, %d failures\n", gap_checks, gap_fails);
+
     translator_free(TR); ev_free(loop);
-    return fails || call_fails ? 1 : 0;
+    return fails || call_fails || gap_fails ? 1 : 0;
 }
