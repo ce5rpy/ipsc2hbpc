@@ -14,6 +14,7 @@
 #define LOGN "translate.translator"
 
 #define MAX_SYNTH_BURSTS    6
+#define TA_QUEUE            4    /* an alias is a header and up to three blocks */
 #define SLOT_MS             0.060
 
 /* IPSC->HBP call-boundary threshold. Current XPR8400 firmware churns the IPSC
@@ -86,16 +87,18 @@ struct translator {
     int      in_consec_synth[3];
     ev_timer *in_delivery_timer[3];
 
-    /* Talker Alias relay (HBP -> IPSC): accumulates the current superframe's
-     * embedded-LC fragments (burst B,C,D,E) as they arrive; on burst E,
-     * dmr_decode_emblc() attempts reassembly. A successful non-GVCU decode
-     * marks in_ta_pending so build_slot_voice_payload() substitutes the
-     * reassembled LC (and raw burst-E fragment) into the one outgoing IPSC
-     * burst-E frame this superframe delivers — the call's own identity
-     * (in_lc/in_emb) is never touched. */
+    /* Talker Alias relay (HBP -> IPSC): the current superframe's embedded-LC
+     * fragments (bursts B,C,D,E) as they arrive; one that reassembles on burst
+     * E into an alias block is queued, and a later outgoing superframe carries
+     * it whole: all four fragments and the burst-E LC repeat.  By then this
+     * superframe's B-D are already out with the call's LC, and a superframe
+     * mixing the two reassembles into neither, leaving late-entry radios mute. */
     uint8_t  in_ta_frag[3][4][4];
-    int      in_ta_pending[3];
-    uint8_t  in_ta_lc[3][9];
+    uint8_t  in_ta_queue[3][TA_QUEUE][9];
+    int      in_ta_queued[3];
+    int      in_sf_alias[3];          /* this outgoing superframe carries in_sf_lc */
+    uint8_t  in_sf_lc[3][9];
+    uint8_t  in_sf_frag[3][4][4];
 
     uint8_t  peer_call_type;
     uint8_t  peer_call_ctrl[4];
@@ -708,25 +711,31 @@ static int build_slot_voice_payload(translator *tr, int ts, int pos, const uint8
     uint8_t slot_burst = (ts == 2) ? SLOT2_VOICE : SLOT1_VOICE;
     const uint8_t *lc = tr->in_lc[ts];
     int p = 0;
+    if (pos == 1) {   /* a superframe's fragments are chosen once, all from one LC */
+        tr->in_sf_alias[ts] = tr->in_ta_queued[ts] > 0;
+        if (tr->in_sf_alias[ts]) {
+            memcpy(tr->in_sf_lc[ts], tr->in_ta_queue[ts][0], 9);
+            dmr_encode_emblc(tr->in_sf_lc[ts], tr->in_sf_frag[ts]);
+            memmove(tr->in_ta_queue[ts][0], tr->in_ta_queue[ts][1], (size_t)--tr->in_ta_queued[ts] * 9);
+        }
+    }
+    const uint8_t (*frag)[4] = tr->in_sf_alias[ts] ? (const uint8_t (*)[4])tr->in_sf_frag[ts]
+                                                   : (const uint8_t (*)[4])tr->in_emb[ts];
+    int has_frag = tr->in_sf_alias[ts] || tr->in_has_emb[ts];
     if (pos == 0) {
         out[p++]=slot_burst; out[p++]=0x14; out[p++]=0x40;
         memcpy(out+p, ambe_19, 19); p+=19;
     } else if (pos == 4) {
-        /* Talker Alias relay: this cycle's burst E may carry a reassembled TA
-         * LC instead of the call's own identity — substitute both the raw
-         * fragment and the IPSC-side reassembled-LC repeat for THIS FRAME
-         * ONLY (in_lc/in_emb, the persisted call identity, are untouched). */
-        const uint8_t *be_frag = (tr->in_ta_pending[ts] ? tr->in_ta_frag[ts][3] : tr->in_emb[ts][3]);
-        const uint8_t *be_lc   = (tr->in_ta_pending[ts] ? tr->in_ta_lc[ts] : lc);
+        /* The LC repeat is the one the superframe's fragments carry. */
+        const uint8_t *be_lc = tr->in_sf_alias[ts] ? tr->in_sf_lc[ts] : lc;
         out[p++]=slot_burst; out[p++]=0x22; out[p++]=0x16;
         memcpy(out+p, ambe_19, 19); p+=19;
-        if (tr->in_ta_pending[ts] || tr->in_has_emb[ts]) memcpy(out+p, be_frag, 4);
+        if (has_frag) memcpy(out+p, frag[3], 4);
         else memset(out+p, 0, 4);
         p+=4;
         memcpy(out+p, be_lc+0, 3); p+=3;
         memcpy(out+p, be_lc+3, 3); p+=3;
         memcpy(out+p, be_lc+6, 3); p+=3;
-        tr->in_ta_pending[ts] = 0;   /* consumed */
         out[p++]=0x14;
     } else if (pos == 5) {
         out[p++]=slot_burst; out[p++]=0x19; out[p++]=0x06;
@@ -735,7 +744,7 @@ static int build_slot_voice_payload(translator *tr, int ts, int pos, const uint8
     } else {
         out[p++]=slot_burst; out[p++]=0x19; out[p++]=0x06;
         memcpy(out+p, ambe_19, 19); p+=19;
-        if (tr->in_has_emb[ts]) memcpy(out+p, tr->in_emb[ts][pos-1], 4);
+        if (has_frag) memcpy(out+p, frag[pos-1], 4);
         else memset(out+p, 0, 4);
         p+=4;
         uint8_t emb_hdr = 0;
@@ -784,7 +793,8 @@ static void clear_in_call(translator *tr, int ts)
     tr->in_has_hbp_stream[ts] = 0;
     tr->in_has_lc[ts] = 0;
     tr->in_has_emb[ts] = 0;
-    tr->in_ta_pending[ts] = 0;
+    tr->in_ta_queued[ts] = 0;
+    tr->in_sf_alias[ts] = 0;
 }
 
 /* Build and send one inbound GROUP_VOICE / PVT_VOICE frame; advance RTP counters. */
@@ -977,21 +987,24 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
     tr->in_buf_present[ts][cur_pos] = 1;
 
     /* Talker Alias relay: bursts B,C,D,E (cur_pos 1-4) each carry one 32-bit
-     * embedded-LC fragment. Accumulate them; on burst E, try to reassemble a
-     * full 9-byte LC. A checksum-valid, non-GVCU/non-own-identity result is a
-     * TA (or GPS) superframe — mark it to override just this one outgoing
-     * IPSC burst-E frame (see build_slot_voice_payload), never in_lc/in_emb. */
+     * embedded-LC fragment. On burst E, one that reassembles into an alias block
+     * is queued for a later outgoing superframe (see build_slot_voice_payload);
+     * in_lc/in_emb, the call's identity, are never touched. */
     if (cur_pos >= 1 && cur_pos <= 4) {
         extract_emb_fragment(payload_33, tr->in_ta_frag[ts][cur_pos - 1]);
         if (cur_pos == 4) {
             uint8_t candidate[9];
             if (dmr_decode_emblc(tr->in_ta_frag[ts], candidate) &&
                 candidate[0] >= FLCO_TA_HEADER && candidate[0] <= FLCO_TA_BLOCK3) {
-                memcpy(tr->in_ta_lc[ts], candidate, 9);
-                tr->in_ta_pending[ts] = 1;
                 char ta_text[8]; ta_lc_text(candidate, ta_text);
-                LOGD(LOGN, "HBP Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" (burst E)",
-                     ts, candidate[0], ta_text);
+                if (tr->in_ta_queued[ts] < TA_QUEUE) {
+                    memcpy(tr->in_ta_queue[ts][tr->in_ta_queued[ts]++], candidate, 9);
+                    LOGD(LOGN, "HBP Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" (queued)",
+                         ts, candidate[0], ta_text);
+                } else {
+                    LOGD(LOGN, "HBP Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" dropped, queue full",
+                         ts, candidate[0], ta_text);
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-/* test_talker_alias_hbp.c — Talker Alias burst-E relay (HBP -> IPSC).
+/* test_talker_alias_hbp.c — Talker Alias relay (HBP -> IPSC).
  *
  * There is no captured live-network HBP master traffic carrying Talker Alias
  * (no C7 capture; DMRGateway/real-master reference is still pending — see
@@ -7,10 +7,12 @@
  * synthetic DMR superframe using dmr_encode_emblc() — the SAME primitive a
  * real DMR transmitter uses, already validated against the Python reference
  * — to produce the 4 burst B/C/D/E embedded-LC fragments a real network
- * would send for a Talker Alias header block, feeds them through
- * translator_hbp_voice_received() exactly like a live master would, and
- * checks that the resulting IPSC-side burst-E frame carries the reassembled
- * TA LC while the call's own identity (src/dst) is unchanged.
+ * would send for Talker Alias blocks, feeds them through
+ * translator_hbp_voice_received() at a master's pace, and checks that every
+ * superframe the repeater gets carries one whole embedded LC (B-E fragments
+ * and the burst-E LC repeat agree), that each alias block arrives whole and in
+ * order, that the call's identity (src/dst) is unchanged, and that an alias
+ * still queued when a call ends does not leak into the next one.
  *
  * All frame bytes are fabricated (arbitrary ids, silence AMBE) — no captured
  * wire data / audio of any kind. */
@@ -23,7 +25,7 @@
 #include "../src/hbp_const.h"
 #include "../src/dmr/dmr.h"
 
-#define MAXCAP 16
+#define MAXCAP 64
 static uint8_t gvcap[MAXCAP][128];
 static int     gvlen[MAXCAP];
 static int     ngv = 0;
@@ -40,7 +42,7 @@ void hbp_deactivate(struct hbp *hb) { (void)hb; }
 void hbp_send_dmrd(struct hbp *hb, const uint8_t *d, int n) { (void)hb; (void)d; (void)n; }
 
 enum { TEST_SRC = 3120001, TEST_DST = 91, TEST_TS = 1 };
-static const uint8_t STREAM_ID[4] = { 0x42, 0x7d, 0x91, 0x7f };
+static uint8_t STREAM_ID[4] = { 0x42, 0x7d, 0x91, 0x7f };
 
 static void put_bits_at(dmr_bit *fb, int off, const dmr_bit *src, int n)
 {
@@ -100,6 +102,30 @@ static int build_dmrd(uint8_t *out, int seq, const uint8_t lc[9], int is_head, i
 
 static void stop_cb(ev_loop *loop, void *ud){ (void)ud; ev_stop(loop); }
 
+/* The frames a master would send, fed at its pace (one burst every 60 ms). */
+#define MAXFEED 64
+static uint8_t feed[MAXFEED][DMRD_LEN];
+static int nfeed, fed;
+static translator *TR;
+
+static void feed_cb(ev_loop *loop, void *ud)
+{
+    (void)ud;
+    translator_hbp_voice_received(TR, feed[fed++], DMRD_LEN);
+    if (fed < nfeed) ev_timer_after(loop, 0.060, feed_cb, NULL);
+}
+
+static int check_lc(const char *what, const uint8_t got[9], const uint8_t want[9])
+{
+    if (memcmp(got, want, 9) == 0) return 0;
+    fprintf(stderr, "FAIL: %s\n  got:  ", what);
+    for (int i = 0; i < 9; i++) fprintf(stderr, "%02x", got[i]);
+    fprintf(stderr, "\n  want: ");
+    for (int i = 0; i < 9; i++) fprintf(stderr, "%02x", want[i]);
+    fprintf(stderr, "\n");
+    return 1;
+}
+
 int main(void)
 {
     Config cfg; char err[4096];
@@ -107,71 +133,87 @@ int main(void)
         fprintf(stderr, "config: %s\n", err); return 2;
     }
     ev_loop *loop = ev_new();
-    translator *tr = translator_new(&cfg, loop);
-    translator_set_protocols(tr, (struct ipsc *)1, (struct hbp *)1);
+    TR = translator_new(&cfg, loop);
+    translator_set_protocols(TR, (struct ipsc *)1, (struct hbp *)1);
 
-    uint8_t call_lc[9] = {0x00,0x00,0x00, 0,0,0, 0,0,0};   /* filled below */
+    uint8_t call_lc[9] = {0x00,0x00,0x00, 0,0,0, 0,0,0};
     call_lc[3]=(TEST_DST>>16)&0xFF; call_lc[4]=(TEST_DST>>8)&0xFF; call_lc[5]=TEST_DST&0xFF;
     call_lc[6]=(TEST_SRC>>16)&0xFF; call_lc[7]=(TEST_SRC>>8)&0xFF; call_lc[8]=TEST_SRC&0xFF;
+    uint8_t ta_head[9] = {0x04, 0x00, (2<<6)|13, 'T','E','S', 'T','L','B'};
+    uint8_t ta_blk1[9] = {0x05, 0x00, 'L','A','B',' ','V','H','F'};
+    uint8_t ta_blk2[9] = {0x06, 0x00, ' ','2','m',0,0,0,0};
+    uint8_t call_frag[4][4], head_frag[4][4], blk1_frag[4][4], blk2_frag[4][4];
+    dmr_encode_emblc(call_lc, call_frag);
+    dmr_encode_emblc(ta_head, head_frag);
+    dmr_encode_emblc(ta_blk1, blk1_frag);
+    dmr_encode_emblc(ta_blk2, blk2_frag);
 
-    uint8_t ta_lc[9] = {0x04, 0x00, (2<<6)|6, 'T','E','S', 'T','L','B'};
-    uint8_t ta_frag[4][4];
-    dmr_encode_emblc(ta_lc, ta_frag);
-
-    uint8_t frame[DMRD_LEN];
-    int seq = 0;
-
-    build_dmrd(frame, seq++, call_lc, 1, 0, 0, NULL);
-    translator_hbp_voice_received(tr, frame, DMRD_LEN);
-
-    build_dmrd(frame, seq++, call_lc, 0, 0, 0, NULL);            /* burst A */
-    translator_hbp_voice_received(tr, frame, DMRD_LEN);
-    for (int pos = 1; pos <= 4; pos++) {                          /* bursts B,C,D,E: TA fragments */
-        build_dmrd(frame, seq++, call_lc, 0, 0, pos, ta_frag[pos - 1]);
-        translator_hbp_voice_received(tr, frame, DMRD_LEN);
+    /* A master's superframes: the radio's alias rides in some of them, between call-LC ones.
+     * The first call ends right after an alias block, still queued when its terminator comes;
+     * the next call (another stream) must not start with it. */
+    uint8_t (*sf[])[4] = { head_frag, call_frag, blk1_frag, call_frag, blk2_frag, call_frag };
+    int ncall1 = 5, nsf = 6, seq = 0;
+    build_dmrd(feed[nfeed++], seq++, call_lc, 1, 0, 0, NULL);
+    for (int k = 0; k < nsf; k++) {
+        if (k == ncall1) {
+            build_dmrd(feed[nfeed++], seq++, call_lc, 0, 1, 0, NULL);
+            STREAM_ID[3] ^= 0xFF;
+            build_dmrd(feed[nfeed++], seq++, call_lc, 1, 0, 0, NULL);
+        }
+        for (int pos = 0; pos < 6; pos++)
+            build_dmrd(feed[nfeed++], seq++, call_lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? sf[k][pos - 1] : NULL);
     }
+    build_dmrd(feed[nfeed++], seq++, call_lc, 0, 1, 0, NULL);
 
-    /* Let the jitter-buffer delivery clock play out bursts A-E. */
-    ev_timer_after(loop, 1.0, stop_cb, loop);
+    ev_timer_after(loop, 0.0, feed_cb, NULL);
+    ev_timer_after(loop, 3.0, stop_cb, loop);
     ev_run(loop);
 
-    int fails = 0, checks = 0;
-
-    /* Find the delivered SLOT1_VOICE burst-E frame (data[32]==GV_BE_FLAG). */
-    const uint8_t *be = NULL;
+    int fails = 0, checks = 0, nout = 0, ta_seen = 0;
+    const uint8_t *ta_want[] = { ta_head, ta_blk1 };
+    /* Every superframe the repeater gets must carry one whole embedded LC: B,C,D,E fragments
+     * that reassemble, matching the LC repeat on burst E. A mixed one (the call's B-D with an
+     * alias's E) is what left late-entry radios mute. */
     for (int i = 0; i < ngv; i++) {
-        if (gvlen[i] > GV_BE_LC_FLCO_OFF + 9 && gvcap[i][32] == GV_BE_FLAG) { be = gvcap[i]; break; }
+        const uint8_t *a = gvcap[i];
+        if (a[30] != SLOT1_VOICE || a[31] != 0x14 || a[32] != 0x40 || i + 4 >= ngv) continue;
+        const uint8_t *b = gvcap[i + 1], *c = gvcap[i + 2], *d = gvcap[i + 3], *e = gvcap[i + 4];
+        if (e[32] != GV_BE_FLAG) continue;
+        uint8_t frag[4][4], lc[9];
+        memcpy(frag[0], b + 52, 4); memcpy(frag[1], c + 52, 4);
+        memcpy(frag[2], d + 52, 4); memcpy(frag[3], e + 52, 4);
+        nout++;
+        checks++;
+        if (!dmr_decode_emblc(frag, lc)) {
+            fprintf(stderr, "FAIL: outgoing superframe %d: bursts B-E do not reassemble into one LC\n", nout);
+            fails++;
+            continue;
+        }
+        checks++;
+        fails += check_lc("burst-E LC repeat differs from the superframe's embedded LC", e + GV_BE_LC_FLCO_OFF, lc);
+        checks++;
+        unsigned src = (unsigned)(e[6]<<16 | e[7]<<8 | e[8]), dst = (unsigned)(e[9]<<16 | e[10]<<8 | e[11]);
+        if (src != (unsigned)TEST_SRC || dst != (unsigned)TEST_DST) {
+            fprintf(stderr, "FAIL: superframe %d changed the call identity: src=%u dst=%u\n", nout, src, dst);
+            fails++;
+        }
+        if (lc[0] >= 0x04 && lc[0] <= 0x07) {
+            checks++;
+            if (ta_seen < 2) fails += check_lc("alias relayed out of order or altered", lc, ta_want[ta_seen]);
+            else { fprintf(stderr, "FAIL: more alias superframes than were sent\n"); fails++; }
+            ta_seen++;
+        } else {
+            checks++;
+            fails += check_lc("a call-LC superframe lost the call's identity", lc, call_lc);
+        }
     }
     checks++;
-    if (!be) {
-        fprintf(stderr, "FAIL: no burst-E GROUP_VOICE frame delivered (got %d GV frames)\n", ngv);
-        fails++;
-    } else {
-        /* 1. Call identity unchanged: header src/dst (bytes 6:9 / 9:12) still
-         * the call's own TEST_SRC/TEST_DST, not the TA text bytes. */
-        checks++;
-        unsigned src = (unsigned)(be[6]<<16 | be[7]<<8 | be[8]);
-        unsigned dst = (unsigned)(be[9]<<16 | be[10]<<8 | be[11]);
-        if (src != (unsigned)TEST_SRC || dst != (unsigned)TEST_DST) {
-            fprintf(stderr, "FAIL: burst-E frame corrupted call identity: src=%u dst=%u (want %u/%u)\n",
-                    src, dst, (unsigned)TEST_SRC, (unsigned)TEST_DST);
-            fails++;
-        }
-
-        /* 2. Burst-E reassembled-LC repeat (data[56..64]) equals the TA LC. */
-        checks++;
-        if (memcmp(be + GV_BE_LC_FLCO_OFF, ta_lc, 9) != 0) {
-            fprintf(stderr, "FAIL: burst-E LC repeat does not match reinjected Talker Alias LC\n  got:  ");
-            for (int i=0;i<9;i++) fprintf(stderr,"%02x",be[GV_BE_LC_FLCO_OFF+i]);
-            fprintf(stderr, "\n  want: ");
-            for (int i=0;i<9;i++) fprintf(stderr,"%02x",ta_lc[i]);
-            fprintf(stderr, "\n");
-            fails++;
-        }
-    }
+    if (nout < nsf) { fprintf(stderr, "FAIL: %d superframes delivered, want at least %d\n", nout, nsf); fails++; }
+    checks++;
+    if (ta_seen != 2) { fprintf(stderr, "FAIL: %d alias superframes relayed, want 2\n", ta_seen); fails++; }
 
     printf("Talker Alias relay (HBP->IPSC): %d checks, %d failures\n", checks, fails);
 
-    translator_free(tr); ev_free(loop);
+    translator_free(TR); ev_free(loop);
     return fails ? 1 : 0;
 }
