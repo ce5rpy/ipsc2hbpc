@@ -260,17 +260,19 @@ passphrase = "passw0rd"
 #               let DMRGateway see the link before the repeater keys up.
 hbp_mode = "TRACKING"
 
-# HBP->IPSC jitter buffer depth, in 60 ms TDMA slots (default 2 = 120 ms).
+# HBP->IPSC jitter buffer depth, in 60 ms TDMA slots (2 = 120 ms when unset).
 # Inbound voice is clocked out to IPSC at this delay, anchored to the first voice
 # burst so every burst gets the full lead, giving the repeater a continuous 60 ms
 # grid.  (The voice header is forwarded immediately, and the terminator is held
 # until the buffered tail drains, so the call tail is not clipped.)  Deeper =
 # absorbs more inbound jitter at the cost of that much added call-setup latency:
 #   1 -> 60 ms   (clean low-latency LAN link)
-#   2 -> 120 ms  (default; absorbs the jitter seen on typical paths)
+#   2 -> 120 ms  (the default when unset; short, clean paths)
+#   5 -> 300 ms  (this sample: a master over the internet, where bursts up to
+#                 300 ms late are common and each one late is heard as a cut)
 #   3-8 -> 180-480 ms (marginal / high-latency RF backhaul — trade delay for
 #                      reliability).  PTT audio tolerates this; c-Bridge adds more.
-jitter_buffer_depth = 2
+jitter_buffer_depth = 5
 
 # ---------------------------------------------------------------------------
 # Options string — sent as RPTO after RPTC if non-empty.
