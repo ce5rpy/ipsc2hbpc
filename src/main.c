@@ -12,6 +12,7 @@
 #include "ipsc.h"
 #include "hbp.h"
 #include "translate.h"
+#include "data.h"
 
 static ev_loop *g_loop = NULL;
 static ipsc    *g_ipsc = NULL;
@@ -89,6 +90,10 @@ int main(int argc, char **argv)
     g_ipsc = ipsc_new(&cfg, tr, g_loop);
     g_hbp  = hbp_new(&cfg, tr, g_loop);
     translator_set_protocols(tr, g_ipsc, g_hbp);
+    datapath *dp = datapath_new(&cfg, g_loop);
+    datapath_set_protocols(dp, g_ipsc, g_hbp, tr);
+    ipsc_set_datapath(g_ipsc, dp);
+    hbp_set_datapath(g_hbp, dp);
 
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_signal;
@@ -111,6 +116,7 @@ int main(int argc, char **argv)
     hbp_free(g_hbp);
     ipsc_free(g_ipsc);
     translator_free(tr);
+    datapath_free(dp);
     ev_free(g_loop);
     LOGI("ipsc2hbp", "ipsc2hbp stopped");
     return 0;

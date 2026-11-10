@@ -92,6 +92,19 @@ void dmr_encode_emblc(const uint8_t lc[9], uint8_t out[4][4]);
 int dmr_decode_emblc(const uint8_t frag[4][4], uint8_t lc_out[9]);
 
 /* ------------------------------------------------------------------ */
+/* Data bursts: PDUs <-> the 196 info bits of a burst                   */
+/* ------------------------------------------------------------------ */
+
+void dmr_bptc_encode_data(const uint8_t data12[12], dmr_bit out196[196]);   /* CSBK, data header, rate 1/2 */
+void dmr_bptc_decode_data(const dmr_bit in196[196], uint8_t data12[12]);
+void dmr_trellis34_encode(const uint8_t data18[18], dmr_bit out196[196]);   /* rate 3/4 */
+int  dmr_trellis34_decode(const dmr_bit in196[196], uint8_t data18[18]);    /* 0, or -1 if not a codeword */
+uint32_t dmr_slot_type_encode(int color_code, int data_type);              /* 20 bits, MSB first */
+uint16_t dmr_crc16_ccitt(const uint8_t *d, int n);
+uint16_t dmr_crc9(const uint8_t *d, int n, int serial);
+uint32_t dmr_crc32_data(const uint8_t *d, int n);
+
+/* ------------------------------------------------------------------ */
 /* AMBE 49<->72 bit conversion — ambe_utils.py                         */
 /* ------------------------------------------------------------------ */
 

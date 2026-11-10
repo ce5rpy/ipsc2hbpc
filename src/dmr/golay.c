@@ -25,3 +25,15 @@ int dmr_parity(uint32_t cw)
     p ^= p >> 1;
     return (int)(p & 1);
 }
+
+/* Golay(20,8) slot type (ETSI TS 102 361-1 B.3.1): the code is linear, so the 12 parity bits of
+ * any byte are the XOR of those of its set bits (MMDVMHost ENCODING_TABLE_2087 at 1, 2, 4 ... 128). */
+uint32_t dmr_slot_type_encode(int color_code, int data_type)
+{
+    static const uint16_t PARITY[8] = { 0xB08E, 0xE093, 0x70A9, 0x60DC, 0x7036, 0xD06C, 0x90D9, 0xA03D };
+    unsigned value = (unsigned)((color_code & 0xF) << 4 | (data_type & 0xF));
+    unsigned parity = 0;
+    for (int i = 0; i < 8; i++)
+        if (value & (1u << i)) parity ^= PARITY[i];
+    return (uint32_t)(value << 12 | (parity & 0xFF) << 4 | parity >> 12);
+}

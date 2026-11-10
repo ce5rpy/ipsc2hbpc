@@ -18,6 +18,8 @@ void hbp_activate(hbp *hb);    /* TRACKING: IPSC peer registered */
 void hbp_deactivate(hbp *hb);  /* TRACKING: IPSC peer lost */
 
 void hbp_send_dmrd(hbp *hb, const uint8_t *data, int len);
+struct datapath;
+void hbp_set_datapath(hbp *hb, struct datapath *dp);
 int  hbp_is_connected(hbp *hb);
 
 #endif

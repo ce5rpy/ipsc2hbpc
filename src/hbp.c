@@ -2,6 +2,7 @@
 #include "hbp.h"
 #include "hbp_const.h"
 #include "translate.h"
+#include "data.h"
 #include "net.h"
 #include "crypto.h"
 #include "log.h"
@@ -24,6 +25,7 @@ enum { ST_LOGIN, ST_AUTH_SENT, ST_CONFIG_SENT, ST_OPTIONS_SENT, ST_CONNECTED, ST
 struct hbp {
     const Config      *cfg;
     struct translator *tr;
+    struct datapath   *dp;
     ev_loop           *loop;
     int                fd;
     int                active;
@@ -296,8 +298,9 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
         LOGI(LOGN, "HBP: <- MSTCL — server initiated disconnect");
         disconnect(hb, 0);
     } else if (memcmp(buf, "DMRD", 4) == 0) {
-        if (hb->state == ST_CONNECTED)
-            translator_hbp_voice_received(hb->tr, buf, n);
+        if (hb->state != ST_CONNECTED) return;
+        if (hb->dp && datapath_is_data_frame(buf, n)) datapath_hbp_received(hb->dp, buf, n);
+        else translator_hbp_voice_received(hb->tr, buf, n);
     } else if (n >= 4 && memcmp(buf, "DMRP", 4) == 0) {
         /* DMRGateway's simplified protocol pinging us one-way -- it reads no
          * reply (see become_connected_no_handshake()), just log it plainly
@@ -426,6 +429,8 @@ void hbp_stop(hbp *hb)
     disconnect(hb, 1);
     if (hb->reconnect_timer) { ev_timer_cancel(hb->loop, hb->reconnect_timer); hb->reconnect_timer = NULL; }
 }
+
+void hbp_set_datapath(hbp *hb, struct datapath *dp) { hb->dp = dp; }
 
 void hbp_free(hbp *hb)
 {
