@@ -2,6 +2,7 @@
 #include "ipsc.h"
 #include "ipsc_const.h"
 #include "translate.h"
+#include "data.h"
 #include "net.h"
 #include "crypto.h"
 #include "log.h"
@@ -58,6 +59,7 @@ typedef struct {
 struct ipsc {
     const Config      *cfg;
     struct translator *tr;
+    struct datapath   *dp;
     ev_loop           *loop;
     int                fd;
     int                is_master;
@@ -648,16 +650,16 @@ static void peer_keepalive_cb(ev_loop *loop, void *ud)
     ip->ka_timer = ev_timer_after(loop, ip->cfg->keepalive_interval, peer_keepalive_cb, ip);
 }
 
-/* Not translated yet: logged whole so captures of ARS/LRRP/TMS can be read from the log. */
+/* Logged whole so ARS/LRRP/TMS traffic can be read from the log. */
 static void log_data_packet(const uint8_t *d, int n, const char *host, int port)
 {
     const char *kind = (d[0] == PVT_DATA) ? "PVT_DATA" : "GROUP_DATA";
     if (n < GV_MIN_LEN) {
-        LOGD(LOGN, "%s len=%d from %s:%d — not relayed  raw=%s", kind, n, host, port, log_hex(d, n));
+        LOGD(LOGN, "%s len=%d from %s:%d — too short  raw=%s", kind, n, host, port, log_hex(d, n));
         return;
     }
     int call_info = d[GV_CALL_INFO_OFF];
-    LOGD(LOGN, "%s len=%d src=%u dst=%u ts=%d end=%d from %s:%d — not relayed  raw=%s",
+    LOGD(LOGN, "%s len=%d src=%u dst=%u ts=%d end=%d from %s:%d  raw=%s",
          kind, n, (unsigned)(d[6] << 16 | d[7] << 8 | d[8]), (unsigned)(d[9] << 16 | d[10] << 8 | d[11]),
          (call_info & TS_CALL_MSK) ? 2 : 1, !!(call_info & END_MSK), host, port, log_hex(d, n));
 }
@@ -700,7 +702,10 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
             case DE_REG_REQ:       master_de_reg_req(ip, buf, n, host, port); break;
             case GROUP_VOICE:
             case PVT_VOICE:        on_ipsc_voice(ip, buf, n, host, port, 0); break;
-            case GROUP_DATA: case PVT_DATA: log_data_packet(buf, n, host, port); break;
+            case GROUP_DATA: case PVT_DATA:
+                log_data_packet(buf, n, host, port);
+                if (ip->dp && n >= 5 && find_peer(ip, buf + 1) >= 0) datapath_ipsc_received(ip->dp, buf, n);
+                break;
             case REPEATER_BLOCKED: LOGD(LOGN, "REPEATER_BLOCKED from %s:%d", host, port); break;
             case CALL_INTERRUPT_REQ: LOGD(LOGN, "CALL_INTERRUPT_REQ from %s:%d", host, port); break;
             case OPCODE_0xF0:      LOGD(LOGN, "0xF0 from %s:%d — observed, benign, no response sent", host, port); break;
@@ -739,7 +744,10 @@ static void recv_cb(ev_loop *loop, int fd, void *ud)
                                           host, port, n, log_hex(buf, n)); break;
             case SYSTEM_MAP_REQ:     LOGI(LOGN, "SYSTEM_MAP_REQ (0x9C) from master %s:%d len=%d raw=%s",
                                           host, port, n, log_hex(buf, n)); break;
-            case GROUP_DATA: case PVT_DATA: log_data_packet(buf, n, host, port); break;
+            case GROUP_DATA: case PVT_DATA:
+                log_data_packet(buf, n, host, port);
+                if (ip->dp && ip->connected) datapath_ipsc_received(ip->dp, buf, n);
+                break;
             case CALL_CONFIRMATION: case TXT_MESSAGE_ACK: case CALL_MON_STATUS: case CALL_MON_RPT:
             case REPEATER_BLOCKED: case RPT_WAKE_UP: case CALL_INTERRUPT_REQ:
             case DE_REG_REPLY: case UNKNOWN_9E: case WIRELINE: case REMOTE_PROG_REQ:
@@ -796,6 +804,8 @@ void ipsc_stop(ipsc *ip)
     }
     ip->connected = 0;
 }
+
+void ipsc_set_datapath(ipsc *ip, struct datapath *dp) { ip->dp = dp; }
 
 void ipsc_free(ipsc *ip)
 {

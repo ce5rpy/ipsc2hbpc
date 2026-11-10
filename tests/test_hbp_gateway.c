@@ -27,6 +27,7 @@
 #include "../src/ipsc_const.h"
 #include "../src/hbp_const.h"
 #include "../src/dmr/dmr.h"
+#include "../src/data.h"
 
 #define MAXCAP 16
 static uint8_t gvcap[MAXCAP][128];
@@ -207,6 +208,27 @@ int main(void)
     if (n != DMRD_LEN || memcmp(buf, frame, DMRD_LEN) != 0) {
         fprintf(stderr, "FAIL: hbp_send_dmrd() did not deliver the expected bytes (n=%d)\n", n);
         fails++;
+    }
+
+    /* 7b. A data burst from the master goes to the data path, not the voice translator. */
+    {
+        datapath *dp = datapath_new(&cfg, loop);
+        datapath_set_protocols(dp, (struct ipsc *)1, hb, tr);
+        hbp_set_datapath(hb, dp);
+        static const char *ACK_HDR =   /* D-APRS link ACK response header, 900999 -> 7140023, TS2 */
+            "444d5244010dbf876cf2b7000dbf87e60728691a37517ed56e548900a15029c7458dff57d75df5d3393090d0e5b409238b938d356c0000";
+        uint8_t d[DMRD_LEN];
+        for (int i = 0; i < DMRD_LEN; i++) sscanf(ACK_HDR + 2 * i, "%2hhx", &d[i]);
+        ngv = 0;
+        udp_sendto(fake_fd, d, DMRD_LEN, cfg.hbp_bind_ip, cfg.hbp_bind_port);
+        pump(loop);
+        checks++;
+        if (ngv != 1 || gvcap[0][0] != PVT_DATA) {
+            fprintf(stderr, "FAIL: data DMRD expected 1 PVT_DATA packet, got %d (first 0x%02x)\n", ngv, ngv ? gvcap[0][0] : 0);
+            fails++;
+        }
+        hbp_set_datapath(hb, NULL);
+        datapath_free(dp);
     }
 
     /* 8. Clean disconnect -> RPTCL. */

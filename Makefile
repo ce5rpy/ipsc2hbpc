@@ -17,6 +17,7 @@ SOURCES := \
 	$(SRC_DIR)/ipsc.c \
 	$(SRC_DIR)/hbp.c \
 	$(SRC_DIR)/translate.c \
+	$(SRC_DIR)/data.c \
 	$(DMR_DIR)/dmr_bits.c \
 	$(DMR_DIR)/dmr_const.c \
 	$(DMR_DIR)/hamming.c \
@@ -24,6 +25,7 @@ SOURCES := \
 	$(DMR_DIR)/rs129.c \
 	$(DMR_DIR)/golay.c \
 	$(DMR_DIR)/bptc.c \
+	$(DMR_DIR)/trellis.c \
 	$(DMR_DIR)/ambe.c
 
 OBJECTS := $(SOURCES:.c=.o)
@@ -91,7 +93,7 @@ $(BIN): $(OBJECTS)
 
 # Translator/DSP sources used by the test harnesses (no ipsc/hbp/main)
 TEST_SUPPORT := $(SRC_DIR)/config.c $(SRC_DIR)/toml.c $(SRC_DIR)/log.c \
-	$(SRC_DIR)/eventloop.c $(SRC_DIR)/translate.c $(DMR_SOURCES)
+	$(SRC_DIR)/eventloop.c $(SRC_DIR)/translate.c $(SRC_DIR)/data.c $(DMR_SOURCES)
 
 # test_hbp_gateway needs the REAL hbp.c (not stubbed) plus net.c/crypto.c, since
 # it drives the HBP role=GATEWAY link over real loopback UDP sockets.
@@ -115,7 +117,10 @@ IPSC_MASTER_SUPPORT := $(TEST_SUPPORT) $(SRC_DIR)/ipsc.c $(SRC_DIR)/net.c $(SRC_
 #  - test_repeater_id_from_login: translator_repeater_id() over real IPSC MASTER_REG_REQ
 #                           registrations: sole repeater's own ID, config ID with 0 or 2+
 #                           repeaters, and ignore_login_repeater_id forcing config ID
-test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c tests/test_hbp_gateway.c tests/test_repeater_id_from_login.c $(HBP_GATEWAY_SUPPORT) $(IPSC_MASTER_SUPPORT)
+#  - test_data:            IPSC data <-> HBP data bursts through a real IPSC master: a captured
+#                           ARS registration with its UDP/IP header restored, D-APRS replies
+#                           to IPSC, Trellis/BPTC known answers from ok-dmrlib
+test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_talker_alias_hbp.c tests/test_emblc_roundtrip.c tests/test_hbp_gateway.c tests/test_repeater_id_from_login.c tests/test_data.c $(HBP_GATEWAY_SUPPORT) $(IPSC_MASTER_SUPPORT)
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/ipsc2hbpc_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_parity tests/test_parity.c $(TEST_SUPPORT)
@@ -130,6 +135,8 @@ test: tests/test_dsp.c tests/test_parity.c tests/test_talker_alias.c tests/test_
 	/tmp/ipsc2hbpc_test_hbp_gateway
 	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_repeater_id tests/test_repeater_id_from_login.c $(IPSC_MASTER_SUPPORT)
 	/tmp/ipsc2hbpc_test_repeater_id
+	$(CC) $(CFLAGS) -I. -o /tmp/ipsc2hbpc_test_data tests/test_data.c $(IPSC_MASTER_SUPPORT)
+	/tmp/ipsc2hbpc_test_data
 
 clean:
 	rm -f $(OBJECTS) $(DEPS) $(BIN)

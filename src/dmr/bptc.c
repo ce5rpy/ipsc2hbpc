@@ -96,6 +96,24 @@ void dmr_bptc_encode_lc(const uint8_t lc[9], int is_term, dmr_bit out196[196])
     interleave_19696(tmp, out196);
 }
 
+void dmr_bptc_encode_data(const uint8_t data12[12], dmr_bit out196[196])
+{
+    dmr_bit tmp[196];
+    dmr_bptc_encode_19696(data12, tmp);
+    interleave_19696(tmp, out196);
+}
+
+/* No error correction: data reaching us over IP is error-free or dropped upstream. */
+void dmr_bptc_decode_data(const dmr_bit in196[196], uint8_t data12[12])
+{
+    dmr_bit bits[96];
+    int n = 0;
+    for (int row = 0; row < 9; row++)
+        for (int col = (row == 0) ? 3 : 0; col < 11; col++)   /* row 0 starts with the 3 reserved R bits */
+            bits[n++] = in196[INDEX_181[row * 15 + 1 + col]];
+    dmr_bits_to_bytes(bits, 96, data12);
+}
+
 void dmr_bptc_decode_full_lc(const dmr_bit in196[196], uint8_t lc_out[9])
 {
     dmr_bit bits[72];

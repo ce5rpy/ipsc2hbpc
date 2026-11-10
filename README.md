@@ -1,6 +1,6 @@
 ## PROJECT: IPSC to HomeBrew Protocol Translator (C) ##
 
-**NOTICE:** This software only supports Group Voice traffic at this time. IPSC is not an open standard. Supporting it involves painstaking reverse engineering of IPSC packets, and much is unknown. IPSC is owned by and heavily protected by Motorola Solutions, Inc. Please do not ask for features that require further deciphering of IPSC without providing verified correct, legally obtained information about the protocol necessary to support a feature.
+**NOTICE:** This software supports group and private voice, Talker Alias, and data (GROUP_DATA / PVT_DATA: CSBK, data headers, rate 1/2 and 3/4 blocks, e.g. MOTOTRBO ARS, LRRP and text messages). IPSC is not an open standard. Supporting it involves painstaking reverse engineering of IPSC packets, and much is unknown. IPSC is owned by and heavily protected by Motorola Solutions, Inc. Please do not ask for features that require further deciphering of IPSC without providing verified correct, legally obtained information about the protocol necessary to support a feature.
 
 **PURPOSE:** A single, small native daemon that connects a Motorola MOTOTRBO IPSC system to one upstream DMR network server running the open HomeBrew Repeater Protocol (BrandMeister, DMR+, FreeDMR, HBlink4, etc.).
 
@@ -16,7 +16,10 @@ The Python `ipsc2hbp` is a single asyncio process — already simple and effecti
 
 **DESIGN GOALS:**
 
-- **Transparent translation only.** No routing, bridging, talkgroup filtering, or rewriting. IPSC peers in, one network out, pass everything through unchanged.
+- **Transparent translation only.** No routing, bridging, talkgroup filtering, or rewriting. IPSC peers in, one network out, pass everything through unchanged. Exceptions, all on data:
+  - A message sent with a DMR-standard compressed UDP/IP header (SAP 3), confirmed or unconfirmed, is held until its last block and sent to HBP with the full IPv4/UDP header (SAP 4), since HBP data services such as D-APRS only accept the latter.
+  - Data from HBP is sent to the repeater only once it has been quiet for 500 ms, one burst per 60 ms TDMA frame; a repeater does not key data that arrives right after its own traffic.
+  - Preambles ahead of a link ACK/NACK are dropped: a MOTOTRBO radio ignores such an ACK and retries its message. Data blocks whose header never arrived are dropped too.
 - **Single event loop, single thread.** A `poll()`-based loop multiplexes the IPSC socket, the HBP socket, and all timers — directly mirroring the original's single asyncio loop. No threads, no locks, no inter-process communication.
 - **One config file.** TOML, identical to the Python version. An existing `ipsc2hbp.toml` works unchanged.
 - **Correct over clever.** Protocol behavior is derived from the DMRlink and HBlink source — not the published specs, which contain several errors. Where the spec disagrees with working code, the code wins.
@@ -26,8 +29,8 @@ The Python `ipsc2hbp` is a single asyncio process — already simple and effecti
 
 **ARCHITECTURE:**
 
-- `src/dmr/` — self-contained DMR DSP/FEC library (BPTC(196,96), embedded LC, AMBE 49↔72-bit conversion, RS(12,9), Hamming, Golay). This module has **no dependency on the rest of the project** and is validated bit-for-bit against the reference `dmr_utils3` implementation. It is structured so it can be lifted into a standalone library unchanged.
-- `src/` — the application: config loader, logging, event loop, UDP helpers, crypto, the IPSC master/peer protocol, the HBP client, and the bidirectional call translator.
+- `src/dmr/` — self-contained DMR DSP/FEC library (BPTC(196,96), embedded LC, AMBE 49↔72-bit conversion, RS(12,9), Hamming, Golay, rate 3/4 Trellis, data CRCs). This module has **no dependency on the rest of the project** and is validated bit-for-bit against the reference `dmr_utils3` implementation. It is structured so it can be lifted into a standalone library unchanged.
+- `src/` — the application: config loader, logging, event loop, UDP helpers, crypto, the IPSC master/peer protocol, the HBP client, the bidirectional call translator, and the data path (`src/data.c`), which handles data bursts apart from voice.
 - `tests/` — a DSP self-test against golden vectors, and a byte-for-byte parity test comparing the C translator output against the Python reference.
 
 **VERIFICATION:**

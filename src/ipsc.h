@@ -16,6 +16,8 @@ void  ipsc_free(ipsc *ip);
 
 /* Send a pre-built GROUP_VOICE packet (master: to all peers; peer: to master). */
 void  ipsc_send_voice(ipsc *ip, const uint8_t *pkt, int len);
+struct datapath;
+void  ipsc_set_datapath(ipsc *ip, struct datapath *dp);
 int   ipsc_has_peers(ipsc *ip);
 
 /* The sole registered repeater's own radio ID, if exactly one is currently
