@@ -16,11 +16,10 @@ The Python `ipsc2hbp` is a single asyncio process — already simple and effecti
 
 **DESIGN GOALS:**
 
-- **Transparent translation only.** No routing, bridging, talkgroup filtering, or rewriting. IPSC peers in, one network out, pass everything through unchanged. Exceptions:
+- **Transparent translation only.** No routing, bridging, talkgroup filtering, or rewriting. IPSC peers in, one network out, pass everything through unchanged. Exceptions, all on data:
   - A message sent with a DMR-standard compressed UDP/IP header (SAP 3), confirmed or unconfirmed, is held until its last block and sent to HBP with the full IPv4/UDP header (SAP 4), since HBP data services such as D-APRS only accept the latter.
   - Data from HBP is sent to the repeater only once it has been quiet for 500 ms, one burst per 60 ms TDMA frame; a repeater does not key data that arrives right after its own traffic.
   - Preambles ahead of a link ACK/NACK are dropped: a MOTOTRBO radio ignores such an ACK and retries its message. Data blocks whose header never arrived are dropped too.
-  - A Talker Alias from HBP reaches the repeater as a MOTOTRBO radio sends it: each block once per call, from the third superframe on, never two superframes running, however often the network repeats it (`talker_alias_to_ipsc = false` drops it).
 - **Single event loop, single thread.** A `poll()`-based loop multiplexes the IPSC socket, the HBP socket, and all timers — directly mirroring the original's single asyncio loop. No threads, no locks, no inter-process communication.
 - **One config file.** TOML, identical to the Python version. An existing `ipsc2hbp.toml` works unchanged.
 - **Correct over clever.** Protocol behavior is derived from the DMRlink and HBlink source — not the published specs, which contain several errors. Where the spec disagrees with working code, the code wins.

@@ -25,7 +25,7 @@
 #include "../src/hbp_const.h"
 #include "../src/dmr/dmr.h"
 
-#define MAXCAP 128
+#define MAXCAP 64
 static uint8_t gvcap[MAXCAP][128];
 static int     gvlen[MAXCAP];
 static int     ngv = 0;
@@ -104,7 +104,7 @@ static int build_dmrd(uint8_t *out, int seq, const uint8_t lc[9], int is_head, i
 static void stop_cb(ev_loop *loop, void *ud){ (void)ud; ev_stop(loop); }
 
 /* The frames a master would send, fed at its pace (one burst every 60 ms). */
-#define MAXFEED 128
+#define MAXFEED 64
 static uint8_t feed[MAXFEED][DMRD_LEN];
 static double feed_gap[MAXFEED];   /* extra silence on the wire before frame i */
 static int nfeed, fed, feed_len = DMRD_LEN;
@@ -139,6 +139,33 @@ static void play_call(ev_loop *loop, const uint8_t lc[9], int head, int skip, in
     ev_run(loop);
 }
 
+/* One transmission cut into two streams with no terminator between them, as a bridge sends it
+ * and a master forwards it: the first ends on burst C of the third superframe, the master holds
+ * the second back for its stream timeout and lets it through from burst E. */
+static void play_split(ev_loop *loop, const uint8_t lc[9], const uint8_t lc2[9])
+{
+    uint8_t frag[4][4], frag2[4][4];
+    int seq = 0;
+    dmr_encode_emblc(lc, frag); dmr_encode_emblc(lc2, frag2);
+    ngv = 0; nfeed = fed = 0; feed_len = DMRD_LEN; test_ts = 1; STREAM_ID[1]++;
+    memset(feed_gap, 0, sizeof feed_gap);
+    build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
+    for (int i = 0; i < 15; i++) {
+        int pos = i % 6;
+        build_dmrd(feed[nfeed++], seq++, lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? frag[pos - 1] : NULL);
+    }
+    STREAM_ID[2]++;
+    feed_gap[nfeed] = 0.30;
+    for (int i = 16; i < 32; i++) {
+        int pos = i % 6;
+        build_dmrd(feed[nfeed++], seq++, lc2, 0, 0, pos, (pos >= 1 && pos <= 4) ? frag2[pos - 1] : NULL);
+    }
+    build_dmrd(feed[nfeed++], seq++, lc2, 0, 1, 0, NULL);
+    ev_timer_after(loop, 0.0, feed_cb, NULL);
+    ev_timer_after(loop, 4.5, stop_cb, loop);
+    ev_run(loop);
+}
+
 /* VOICE_HEADs and VOICE_TERMs sent, how many headers came right before a voice burst A (a
  * call's voice starts on burst A after its headers), and whether every frame kept the first
  * one's IPSC stream id. */
@@ -155,39 +182,6 @@ static void count_calls(int *heads, int *terms, int *heads_before_voice, int *on
         if (gvcap[i][30] == VOICE_TERM) (*terms)++;
         if (gvcap[i][5] != gvcap[0][5]) *one_stream = 0;
     }
-}
-
-/* The outgoing superframes' embedded LCs, in order: lcs[k] is superframe k's (all zero when
- * its bursts B-E do not reassemble).  Returns how many superframes were delivered. */
-static int out_superframes(uint8_t lcs[][9], int max)
-{
-    int n = 0;
-    for (int i = 0; i + 4 < ngv && n < max; i++) {
-        const uint8_t *a = gvcap[i];
-        if (a[30] != SLOT1_VOICE || a[31] != 0x14 || a[32] != 0x40 || gvcap[i + 4][32] != GV_BE_FLAG) continue;
-        uint8_t frag[4][4];
-        for (int k = 0; k < 4; k++) memcpy(frag[k], gvcap[i + 1 + k] + 52, 4);
-        if (!dmr_decode_emblc(frag, lcs[n])) memset(lcs[n], 0, 9);
-        n++;
-    }
-    return n;
-}
-
-/* A call whose superframes carry the alias as a server re-injects it: every other superframe,
- * over and over (pattern[k % 6]). */
-static void play_reinjected(ev_loop *loop, const uint8_t lc[9], uint8_t (*const pattern[6])[4], int nsf)
-{
-    int seq = 0;
-    ngv = 0; nfeed = fed = 0; feed_len = DMRD_LEN; test_ts = 1; STREAM_ID[1]++;
-    memset(feed_gap, 0, sizeof feed_gap);
-    build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
-    for (int k = 0; k < nsf; k++)
-        for (int pos = 0; pos < 6; pos++)
-            build_dmrd(feed[nfeed++], seq++, lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? pattern[k % 6][pos - 1] : NULL);
-    build_dmrd(feed[nfeed++], seq++, lc, 0, 1, 0, NULL);
-    ev_timer_after(loop, 0.0, feed_cb, NULL);
-    ev_timer_after(loop, 0.5 + nsf * 0.36 + 2.0, stop_cb, loop);
-    ev_run(loop);
 }
 
 static int check_lc(const char *what, const uint8_t got[9], const uint8_t want[9])
@@ -289,7 +283,6 @@ int main(void)
 
     printf("Talker Alias relay (HBP->IPSC): %d checks, %d failures\n", checks, fails);
 
-
     /* The calls above were on TS1: their VOICE_HEAD / VOICE_TERM say so (byte 31 bit 7). */
     int call_fails = 0, call_checks = 0, heads = 0, terms = 0;
     for (int i = 0; i < ngv; i++)
@@ -370,47 +363,26 @@ int main(void)
                 heads, hv, terms);
         gap_fails++;
     }
+    /* A new stream id with the same caller and target is the same call; another caller is not. */
+    play_split(loop, call_lc, call_lc);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 1 || terms != 1 || !one) {
+        fprintf(stderr, "FAIL: a call split into two streams: %d VOICE_HEAD, %d VOICE_TERM, %s IPSC call\n",
+                heads, terms, one ? "one" : "more than one");
+        gap_fails++;
+    }
+    uint8_t other_lc[9]; memcpy(other_lc, call_lc, 9); other_lc[8]++;
+    play_split(loop, call_lc, other_lc);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 4 || one) {
+        fprintf(stderr, "FAIL: another caller on a new stream: %d VOICE_HEAD, %s IPSC call, want 4 and two\n",
+                heads, one ? "one" : "more than one");
+        gap_fails++;
+    }
     printf("HBP->IPSC network gaps: %d checks, %d failures\n", gap_checks, gap_fails);
 
-    /* The alias re-injected by the server every other superframe: the repeater gets each
-     * block once, as a radio sends it, from the third superframe on and never two running;
-     * the rest carry the call's LC.  With talker_alias_to_ipsc = false, none at all. */
-    int rp_fails = 0, rp_checks = 0;
-    uint8_t lcs[24][9];
-    const uint8_t *rp_want[] = { ta_head, ta_blk1, ta_blk2 };
-    play_reinjected(loop, call_lc, sf, 12);
-    int nsfo = out_superframes(lcs, 24), nalias = 0, last_alias = -9;
-    for (int k = 0; k < nsfo; k++) {
-        if (lcs[k][0] < 0x04 || lcs[k][0] > 0x07) {
-            rp_checks++;
-            rp_fails += check_lc("re-injected alias: a call-LC superframe lost the call's identity", lcs[k], call_lc);
-            continue;
-        }
-        rp_checks++;
-        if (nalias < 3) rp_fails += check_lc("re-injected alias: blocks out of order", lcs[k], rp_want[nalias]);
-        else { fprintf(stderr, "FAIL: re-injected alias: block repeated in superframe %d\n", k + 1); rp_fails++; }
-        rp_checks++;
-        if (k < 2) { fprintf(stderr, "FAIL: re-injected alias in superframe %d, want the third on\n", k + 1); rp_fails++; }
-        rp_checks++;
-        if (k == last_alias + 1) { fprintf(stderr, "FAIL: alias in superframes %d and %d running\n", k, k + 1); rp_fails++; }
-        last_alias = k;
-        nalias++;
-    }
-    rp_checks++;
-    if (nsfo < 12 || nalias != 3) {
-        fprintf(stderr, "FAIL: re-injected alias: %d superframes, %d with alias, want 12 and 3\n", nsfo, nalias);
-        rp_fails++;
-    }
-    cfg.talker_alias_to_ipsc = 0;
-    play_reinjected(loop, call_lc, sf, 12);
-    nsfo = out_superframes(lcs, 24);
-    for (int k = 0; k < nsfo; k++) {
-        rp_checks++;
-        rp_fails += check_lc("talker_alias_to_ipsc = false: an alias reached the repeater", lcs[k], call_lc);
-    }
-    cfg.talker_alias_to_ipsc = 1;
-    printf("Talker Alias pacing (HBP->IPSC): %d checks, %d failures\n", rp_checks, rp_fails);
-
     translator_free(TR); ev_free(loop);
-    return fails || call_fails || gap_fails || rp_fails ? 1 : 0;
+    return fails || call_fails || gap_fails ? 1 : 0;
 }
