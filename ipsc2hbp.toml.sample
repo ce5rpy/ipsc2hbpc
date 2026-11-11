@@ -274,6 +274,11 @@ hbp_mode = "TRACKING"
 #                      reliability).  PTT audio tolerates this; c-Bridge adds more.
 jitter_buffer_depth = 5
 
+# Relay the Talker Alias that HBP calls carry to the repeater (default true).  It is
+# sent as a MOTOTRBO radio sends it: once per call, a few superframes in, however
+# often the network repeats it.  Set false to send the repeater calls without it.
+# talker_alias_to_ipsc = true
+
 # ---------------------------------------------------------------------------
 # Options string — sent as RPTO after RPTC if non-empty.
 # Used to subscribe to specific TGIDs on HBlink4 and compatible servers.
