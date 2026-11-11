@@ -57,6 +57,7 @@ typedef struct {
     int      hbp_passphrase_len;
     char     hbp_mode[16];          /* "TRACKING" | "PERSISTENT" — CLIENT role only */
     int      jitter_buffer_depth;   /* HBP->IPSC delivery delay in 60 ms slots */
+    int      talker_alias_to_ipsc;  /* relay HBP Talker Alias to the repeater */
 
     /* RPTC announcement fields */
     char     options[512];
