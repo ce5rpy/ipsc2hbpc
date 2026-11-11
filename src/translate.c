@@ -19,10 +19,6 @@
 #define MAX_SYNTH_BURSTS    25
 #define LATE_ENTRY_HEADS    3    /* VOICE_HEADs before a call joined without one (MMDVMHost duplex) */
 #define TA_QUEUE            4    /* an alias is a header and up to three blocks */
-/* HBP -> IPSC alias pacing, as a MOTOTRBO radio sends it: first in the third superframe,
- * never two superframes running, each block once per call.  Servers re-inject the alias every
- * ~0.7 s; relayed as is, half the superframes would carry it in place of the call's LC. */
-#define TA_FIRST_SF         3
 #define SLOT_MS             0.060
 
 /* IPSC->HBP call-boundary threshold. Current XPR8400 firmware churns the IPSC
@@ -96,9 +92,6 @@ struct translator {
     uint8_t  in_ta_frag[3][4][4];
     uint8_t  in_ta_queue[3][TA_QUEUE][9];
     int      in_ta_queued[3];
-    int      in_ta_relayed[3];        /* alias blocks queued this call, bit (FLCO - FLCO_TA_HEADER) */
-    int      in_sf_count[3];          /* outgoing superframes this call */
-    int      in_alias_sf[3];          /* in_sf_count of the last one that carried an alias */
     int      in_sf_alias[3];          /* this outgoing superframe carries in_sf_lc */
     uint8_t  in_sf_lc[3][9];
     uint8_t  in_sf_frag[3][4][4];
@@ -645,10 +638,8 @@ static int build_slot_voice_payload(translator *tr, int ts, int pos, const uint8
     const uint8_t *lc = tr->in_lc[ts];
     int p = 0;
     if (pos == 1) {   /* a superframe's fragments are chosen once, all from one LC */
-        int sf = ++tr->in_sf_count[ts];
-        tr->in_sf_alias[ts] = tr->in_ta_queued[ts] > 0 && sf >= TA_FIRST_SF && sf - tr->in_alias_sf[ts] > 1;
+        tr->in_sf_alias[ts] = tr->in_ta_queued[ts] > 0;
         if (tr->in_sf_alias[ts]) {
-            tr->in_alias_sf[ts] = sf;
             memcpy(tr->in_sf_lc[ts], tr->in_ta_queue[ts][0], 9);
             dmr_encode_emblc(tr->in_sf_lc[ts], tr->in_sf_frag[ts]);
             memmove(tr->in_ta_queue[ts][0], tr->in_ta_queue[ts][1], (size_t)--tr->in_ta_queued[ts] * 9);
@@ -729,9 +720,6 @@ static void clear_in_call(translator *tr, int ts)
     tr->in_has_lc[ts] = 0;
     tr->in_has_emb[ts] = 0;
     tr->in_ta_queued[ts] = 0;
-    tr->in_ta_relayed[ts] = 0;
-    tr->in_sf_count[ts] = 0;
-    tr->in_alias_sf[ts] = 0;
     tr->in_sf_alias[ts] = 0;
 }
 
@@ -938,18 +926,14 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
      * embedded-LC fragment. On burst E, one that reassembles into an alias block
      * is queued for a later outgoing superframe (see build_slot_voice_payload);
      * in_lc/in_emb, the call's identity, are never touched. */
-    if (cur_pos >= 1 && cur_pos <= 4 && tr->cfg->talker_alias_to_ipsc) {
+    if (cur_pos >= 1 && cur_pos <= 4) {
         extract_emb_fragment(payload_33, tr->in_ta_frag[ts][cur_pos - 1]);
         if (cur_pos == 4) {
             uint8_t candidate[9];
             if (dmr_decode_emblc(tr->in_ta_frag[ts], candidate) &&
                 candidate[0] >= FLCO_TA_HEADER && candidate[0] <= FLCO_TA_BLOCK3) {
                 char ta_text[8]; ta_lc_text(candidate, ta_text);
-                int block = 1 << (candidate[0] - FLCO_TA_HEADER);
-                if (tr->in_ta_relayed[ts] & block) {
-                    /* a re-injected repeat: this call has had the block already */
-                } else if (tr->in_ta_queued[ts] < TA_QUEUE) {
-                    tr->in_ta_relayed[ts] |= block;
+                if (tr->in_ta_queued[ts] < TA_QUEUE) {
                     memcpy(tr->in_ta_queue[ts][tr->in_ta_queued[ts]++], candidate, 9);
                     LOGD(LOGN, "HBP Talker Alias relay: ts=%d flco=0x%02x text=\"%s\" (queued)",
                          ts, candidate[0], ta_text);
