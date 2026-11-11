@@ -139,6 +139,33 @@ static void play_call(ev_loop *loop, const uint8_t lc[9], int head, int skip, in
     ev_run(loop);
 }
 
+/* One transmission cut into two streams with no terminator between them, as a bridge sends it
+ * and a master forwards it: the first ends on burst C of the third superframe, the master holds
+ * the second back for its stream timeout and lets it through from burst E. */
+static void play_split(ev_loop *loop, const uint8_t lc[9], const uint8_t lc2[9])
+{
+    uint8_t frag[4][4], frag2[4][4];
+    int seq = 0;
+    dmr_encode_emblc(lc, frag); dmr_encode_emblc(lc2, frag2);
+    ngv = 0; nfeed = fed = 0; feed_len = DMRD_LEN; test_ts = 1; STREAM_ID[1]++;
+    memset(feed_gap, 0, sizeof feed_gap);
+    build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
+    for (int i = 0; i < 15; i++) {
+        int pos = i % 6;
+        build_dmrd(feed[nfeed++], seq++, lc, 0, 0, pos, (pos >= 1 && pos <= 4) ? frag[pos - 1] : NULL);
+    }
+    STREAM_ID[2]++;
+    feed_gap[nfeed] = 0.30;
+    for (int i = 16; i < 32; i++) {
+        int pos = i % 6;
+        build_dmrd(feed[nfeed++], seq++, lc2, 0, 0, pos, (pos >= 1 && pos <= 4) ? frag2[pos - 1] : NULL);
+    }
+    build_dmrd(feed[nfeed++], seq++, lc2, 0, 1, 0, NULL);
+    ev_timer_after(loop, 0.0, feed_cb, NULL);
+    ev_timer_after(loop, 4.5, stop_cb, loop);
+    ev_run(loop);
+}
+
 /* VOICE_HEADs and VOICE_TERMs sent, how many headers came right before a voice burst A (a
  * call's voice starts on burst A after its headers), and whether every frame kept the first
  * one's IPSC stream id. */
@@ -334,6 +361,24 @@ int main(void)
     if (heads != 4 || hv != 2 || terms != 2) {
         fprintf(stderr, "FAIL: a 2 s gap: %d VOICE_HEAD (%d before voice), %d VOICE_TERM, want 4, 2, 2\n",
                 heads, hv, terms);
+        gap_fails++;
+    }
+    /* A new stream id with the same caller and target is the same call; another caller is not. */
+    play_split(loop, call_lc, call_lc);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 1 || terms != 1 || !one) {
+        fprintf(stderr, "FAIL: a call split into two streams: %d VOICE_HEAD, %d VOICE_TERM, %s IPSC call\n",
+                heads, terms, one ? "one" : "more than one");
+        gap_fails++;
+    }
+    uint8_t other_lc[9]; memcpy(other_lc, call_lc, 9); other_lc[8]++;
+    play_split(loop, call_lc, other_lc);
+    count_calls(&heads, &terms, &hv, &one);
+    gap_checks++;
+    if (heads != 4 || one) {
+        fprintf(stderr, "FAIL: another caller on a new stream: %d VOICE_HEAD, %s IPSC call, want 4 and two\n",
+                heads, one ? "one" : "more than one");
         gap_fails++;
     }
     printf("HBP->IPSC network gaps: %d checks, %d failures\n", gap_checks, gap_fails);

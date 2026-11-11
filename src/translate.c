@@ -888,10 +888,15 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
     /* VOICESYNC (burst A) or VOICE (B-F) */
     if (tr->in_has_lc[ts] && tr->in_has_hbp_stream[ts] &&
         memcmp(tr->in_hbp_stream[ts], hbp_stream, 4) != 0) {
-        LOGW(LOGN, "HBP stream ID changed on ts=%d (%s->%s) — prior call ended without "
-                   "VOICE_TERM, clearing stale state",
-             ts, log_hex(tr->in_hbp_stream[ts], 4), log_hex(hbp_stream, 4));
-        clear_in_call(tr, ts);
+        /* Some bridges (dmrlink) cut one transmission into several streams with no
+         * terminator between them; the same caller and target is the same call. */
+        int same_call = !memcmp(tr->in_lc[ts] + 3, dst_id, 3) && !memcmp(tr->in_lc[ts] + 6, src_sub, 3);
+        char prev[9]; memcpy(prev, log_hex(tr->in_hbp_stream[ts], 4), sizeof prev);
+        LOGW(LOGN, "HBP stream ID changed on ts=%d (%s->%s) without VOICE_TERM — %s",
+             ts, prev, log_hex(hbp_stream, 4),
+             same_call ? "same src/dst, continuing the call" : "clearing stale state");
+        if (same_call) memcpy(tr->in_hbp_stream[ts], hbp_stream, 4);
+        else clear_in_call(tr, ts);
     }
     if (!tr->in_has_lc[ts]) {
         /* Joined without a header (midway, or back after a gap that ended the call): as
