@@ -117,17 +117,17 @@ static void feed_cb(ev_loop *loop, void *ud)
     if (fed < nfeed) ev_timer_after(loop, 0.060 + feed_gap[fed], feed_cb, NULL);
 }
 
-/* One call on TS1: an optional header, nsf superframes (the first `skip` bursts not sent, as
+/* One call on TS1: `heads` headers, nsf superframes (the first `skip` bursts not sent, as
  * when a call is joined midway) with `gap` seconds of nothing on the wire before superframe
  * `gap_at`, a terminator; played out, then the GV frames sent. */
-static void play_call(ev_loop *loop, const uint8_t lc[9], int head, int skip, int nsf, int gap_at, double gap)
+static void play_call(ev_loop *loop, const uint8_t lc[9], int heads, int skip, int nsf, int gap_at, double gap)
 {
     uint8_t frag[4][4];
     int seq = 0;
     dmr_encode_emblc(lc, frag);
     ngv = 0; nfeed = fed = 0; feed_len = DMRD_LEN; test_ts = 1; STREAM_ID[1]++;
     memset(feed_gap, 0, sizeof feed_gap);
-    if (head) build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
+    for (int h = 0; h < heads; h++) build_dmrd(feed[nfeed++], seq++, lc, 1, 0, 0, NULL);
     for (int k = 0; k < nsf; k++) {
         if (k == gap_at) feed_gap[nfeed] = gap;
         for (int pos = k ? 0 : skip; pos < 6; pos++)
@@ -182,6 +182,40 @@ static void count_calls(int *heads, int *terms, int *heads_before_voice, int *on
         if (gvcap[i][30] == VOICE_TERM) (*terms)++;
         if (gvcap[i][5] != gvcap[0][5]) *one_stream = 0;
     }
+}
+
+/* RTP as a Motorola repeater sends a call (captures/20260720-talkeralias-group-ts1.pcap, DMRlink's
+ * Retired/template.py): the marker on its first packet only, and each packet but the terminator one
+ * slot (480) after the one before, header repeats included. */
+static uint32_t rtp_ts(const uint8_t *p)
+{
+    return (uint32_t)p[GV_RTP_TS_OFF] << 24 | (uint32_t)p[GV_RTP_TS_OFF + 1] << 16 |
+           (uint32_t)p[GV_RTP_TS_OFF + 2] << 8 | p[GV_RTP_TS_OFF + 3];
+}
+
+static int rtp_like_motorola(const char *what)
+{
+    enum { RTP_MARKER_OFF = GV_RTP_TS_OFF - 3 };
+    int fails = 0;
+    for (int i = 0; i < ngv; i++) {
+        const uint8_t *p = gvcap[i];
+        int type = p[GV_BURST_TYPE_OFF];
+        int first = i == 0 || p[GV_CALL_SEQ_OFF] != gvcap[i - 1][GV_CALL_SEQ_OFF];
+        int marker = (p[RTP_MARKER_OFF] & 0x80) != 0;
+        if (marker != first) {
+            fprintf(stderr, "FAIL: %s: packet %d (type 0x%02x) %s the call-start marker\n",
+                    what, i, type, marker ? "carries" : "lacks");
+            fails++;
+        }
+        if (first || type == VOICE_TERM) continue;
+        uint32_t step = rtp_ts(p) - rtp_ts(gvcap[i - 1]);
+        if (step != 480) {
+            fprintf(stderr, "FAIL: %s: packet %d (type 0x%02x) is %u RTP ticks after the one before, want 480\n",
+                    what, i, type, step);
+            fails++;
+        }
+    }
+    return fails;
 }
 
 static int check_lc(const char *what, const uint8_t got[9], const uint8_t want[9])
@@ -383,6 +417,26 @@ int main(void)
     }
     printf("HBP->IPSC network gaps: %d checks, %d failures\n", gap_checks, gap_fails);
 
+    /* Header repeats: a call bridged from another repeater reaches the master with two headers,
+     * and a call joined midway gets three. */
+    int rtp_fails = 0, rtp_checks = 0;
+    play_call(loop, call_lc, 2, 0, 3, -1, 0.0);
+    count_calls(&heads, &terms, &hv, &one);
+    rtp_checks++;
+    if (heads != 2 || terms != 1) {
+        fprintf(stderr, "FAIL: a call with two headers: %d VOICE_HEAD, %d VOICE_TERM, want 2 and 1\n", heads, terms);
+        rtp_fails++;
+    }
+    rtp_checks++;
+    rtp_fails += rtp_like_motorola("a call with two headers") != 0;
+    play_call(loop, call_lc, 0, 2, 2, -1, 0.0);
+    rtp_checks++;
+    rtp_fails += rtp_like_motorola("a call joined midway") != 0;
+    play_call(loop, call_lc, 1, 0, 2, -1, 0.0);
+    rtp_checks++;
+    rtp_fails += rtp_like_motorola("a call with one header") != 0;
+    printf("HBP->IPSC header RTP: %d checks, %d failures\n", rtp_checks, rtp_fails);
+
     translator_free(TR); ev_free(loop);
-    return fails || call_fails || gap_fails ? 1 : 0;
+    return fails || call_fails || gap_fails || rtp_fails ? 1 : 0;
 }
