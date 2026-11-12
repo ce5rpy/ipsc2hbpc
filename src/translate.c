@@ -744,7 +744,10 @@ static void emit_head(translator *tr, int ts, const uint8_t lc[9])
     int call_info = (ts == 2) ? TS_CALL_MSK : 0x00;
     uint8_t gv_payload[24]; gv_payload[0]=VOICE_HEAD;
     build_ipsc_voice_payload(lc, VOICE_HEAD, ts, gv_payload+1);
-    emit_in(tr, ts, lc, call_info, 0xdd, gv_payload, 24, 0);
+    /* As a Motorola repeater sends them: the call-start marker on the first header only, each
+     * repeat one slot later. */
+    int first = tr->in_rtp_seq[ts] == 0;
+    emit_in(tr, ts, lc, call_info, first ? 0xdd : 0x5d, gv_payload, 24, !first);
 }
 
 static void emit_term(translator *tr, int ts)
