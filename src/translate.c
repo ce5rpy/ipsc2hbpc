@@ -17,7 +17,7 @@
  * MMDVMHost's network watchdog does: ended sooner, it came back without a header and the
  * repeater kept its radios mute. */
 #define MAX_SYNTH_BURSTS    25
-#define LATE_ENTRY_HEADS    3    /* VOICE_HEADs before a call joined without one (MMDVMHost duplex) */
+#define CALL_HEADS          3    /* VOICE_HEADs per call, one slot apart, as the old DMRlink stack sends them */
 #define TA_QUEUE            4    /* an alias is a header and up to three blocks */
 #define SLOT_MS             0.060
 
@@ -82,6 +82,9 @@ struct translator {
     int      in_burst_pos[3];
     int      in_consec_synth[3];
     ev_timer *in_delivery_timer[3];
+    ev_timer *in_head_timer[3];
+    int      in_heads_left[3];
+    double   in_heads_end[3];         /* when the last of the call's headers goes out */
 
     /* Talker Alias relay (HBP -> IPSC): the current superframe's embedded-LC
      * fragments (bursts B,C,D,E) as they arrive; one that reassembles on burst
@@ -136,15 +139,13 @@ static void u32_be(uint32_t v, uint8_t out[4])
     out[0]=(uint8_t)(v>>24); out[1]=(uint8_t)(v>>16); out[2]=(uint8_t)(v>>8); out[3]=(uint8_t)v;
 }
 
-/* 72-bit AMBE silence frame from MMDVMHost DMR_SILENCE_DATA; replaces frames the
- * repeater flagged bad (IPSC->HBP). */
+/* 72-bit AMBE silence frame from MMDVMHost DMR_SILENCE_DATA (b0=125, what radios send). */
 static const uint8_t AMBE_SILENCE_MMDVM[9] = {0xB9,0xE8,0x81,0x52,0x61,0x73,0x00,0x2A,0x6B};
 
 /* precompute 19-byte IPSC AMBE payload of three silence frames */
 static void make_ambe_silence(uint8_t out[19])
 {
-    static const uint8_t sil72_bytes[9] = {0xAC,0xAA,0x40,0x20,0x00,0x44,0x40,0x80,0x80};
-    dmr_bit sil72[72]; dmr_bytes_to_bits(sil72_bytes, 9, sil72);
+    dmr_bit sil72[72]; dmr_bytes_to_bits(AMBE_SILENCE_MMDVM, 9, sil72);
     dmr_bit sil49[49]; dmr_ambe_72_to_49(sil72, sil49);
     dmr_bit bits[152]; memset(bits, 0, sizeof bits);
     memcpy(bits + 0,   sil49, 49);
@@ -298,8 +299,10 @@ uint32_t translator_repeater_id(translator *tr)
 void translator_free(translator *tr)
 {
     if (!tr) return;
-    for (int ts = 1; ts <= 2; ts++)
+    for (int ts = 1; ts <= 2; ts++) {
         if (tr->in_delivery_timer[ts]) ev_timer_cancel(tr->loop, tr->in_delivery_timer[ts]);
+        if (tr->in_head_timer[ts]) ev_timer_cancel(tr->loop, tr->in_head_timer[ts]);
+    }
     free(tr);
 }
 
@@ -308,9 +311,16 @@ static void cancel_delivery_timer(translator *tr, int ts)
     if (tr->in_delivery_timer[ts]) { ev_timer_cancel(tr->loop, tr->in_delivery_timer[ts]); tr->in_delivery_timer[ts] = NULL; }
 }
 
+static void cancel_head_timer(translator *tr, int ts)
+{
+    if (tr->in_head_timer[ts]) { ev_timer_cancel(tr->loop, tr->in_head_timer[ts]); tr->in_head_timer[ts] = NULL; }
+    tr->in_heads_left[ts] = 0;
+    tr->in_heads_end[ts] = 0.0;
+}
+
 static void init_call_state(translator *tr)
 {
-    for (int ts = 1; ts <= 2; ts++) { cancel_delivery_timer(tr, ts); out_reset_call(tr, ts); }
+    for (int ts = 1; ts <= 2; ts++) { cancel_delivery_timer(tr, ts); cancel_head_timer(tr, ts); out_reset_call(tr, ts); }
     tr->out_last_pkt[1]=tr->out_last_pkt[2]=0.0;
     tr->out_has_rtp[1]=tr->out_has_rtp[2]=0;
     tr->out_ts_mismatch_warned[1]=tr->out_ts_mismatch_warned[2]=0;
@@ -697,7 +707,9 @@ static void arm_clock_from_voice(translator *tr, int ts, int first_pos)
     if (clock_idle(tr, ts)) {
         tr->in_burst_pos[ts] = first_pos;
         tr->in_consec_synth[ts] = 0;
-        tr->in_next_slot_time[ts] = ev_now(tr->loop) + tr->cfg->jitter_buffer_depth * SLOT_MS;
+        double first = ev_now(tr->loop) + tr->cfg->jitter_buffer_depth * SLOT_MS;
+        if (first < tr->in_heads_end[ts] + SLOT_MS) first = tr->in_heads_end[ts] + SLOT_MS;
+        tr->in_next_slot_time[ts] = first;
         arm_delivery(tr, ts);
     }
 }
@@ -711,6 +723,7 @@ static void advance_clock(translator *tr, int ts)
 static void clear_in_call(translator *tr, int ts)
 {
     cancel_delivery_timer(tr, ts);
+    cancel_head_timer(tr, ts);
     memset(tr->in_buf_present[ts], 0, sizeof tr->in_buf_present[ts]);
     tr->in_term_pending[ts] = 0;
     tr->in_next_slot_time[ts] = 0.0;
@@ -750,6 +763,28 @@ static void emit_head(translator *tr, int ts, const uint8_t lc[9])
     emit_in(tr, ts, lc, call_info, first ? 0xdd : 0x5d, gv_payload, 24, !first);
 }
 
+static void head_timer_cb(ev_loop *loop, void *ud)
+{
+    (void)loop;
+    struct deliv_ctx *c = ud;
+    translator *tr = c->tr; int ts = c->ts;
+    tr->in_head_timer[ts] = NULL;
+    if (!ipsc_has_peers(tr->ip) || !tr->in_has_lc[ts]) return;
+    emit_head(tr, ts, tr->in_lc[ts]);
+    if (--tr->in_heads_left[ts] > 0)
+        tr->in_head_timer[ts] = ev_timer_after(tr->loop, SLOT_MS, head_timer_cb, &tr->deliv[ts]);
+}
+
+/* The call's own CALL_HEADS headers on the slot grid; header repeats from the network are
+ * not relayed, as their spacing is whatever the path upstream made of it. */
+static void start_heads(translator *tr, int ts)
+{
+    emit_head(tr, ts, tr->in_lc[ts]);
+    tr->in_heads_left[ts] = CALL_HEADS - 1;
+    tr->in_heads_end[ts] = ev_now(tr->loop) + (CALL_HEADS - 1) * SLOT_MS;
+    tr->in_head_timer[ts] = ev_timer_after(tr->loop, SLOT_MS, head_timer_cb, &tr->deliv[ts]);
+}
+
 static void emit_term(translator *tr, int ts)
 {
     const uint8_t *lc = tr->in_lc[ts];
@@ -775,7 +810,7 @@ static void deliver_slot(translator *tr, int ts)
     int call_info = (ts == 2) ? TS_CALL_MSK : 0x00;
 
     /* Voice delivery (position-indexed; silence fills jitter gaps).  Headers are
-     * not clocked here — they are forwarded immediately on receive. */
+     * not clocked here — start_heads paces them. */
     int pos = tr->in_burst_pos[ts];
     const uint8_t *ambe_19;
     if (tr->in_buf_present[ts][pos]) {
@@ -854,16 +889,13 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
                  ts, is_private ? "private" : "group",
                  log_hex(hbp_stream, 4), tr->in_stream_id[ts]);
         } else {
-            /* Duplicate VOICE_HEAD — Motorola radios send 2-3 for loss
-             * resilience.  Relay each one faithfully; never fabricate. */
-            LOGD(LOGN, "Duplicate VOICE_HEAD ts=%d stream=%s — forwarding, stream_id=0x%02x",
+            LOGD(LOGN, "Duplicate VOICE_HEAD ts=%d stream=%s — not relayed, stream_id=0x%02x",
                  ts, log_hex(hbp_stream, 4), tr->in_stream_id[ts]);
+            return;
         }
         memcpy(tr->in_lc[ts], lc, 9); tr->in_has_lc[ts]=1;
         dmr_encode_emblc(lc, tr->in_emb[ts]); tr->in_has_emb[ts]=1;
-        /* Forward the header immediately — preserves the source's header spacing
-         * exactly and keeps the header out of the voice delivery clock. */
-        emit_head(tr, ts, lc);
+        start_heads(tr, ts);
         return;
     }
 
@@ -919,7 +951,7 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
              ts, (unsigned)(src_sub[0]<<16|src_sub[1]<<8|src_sub[2]),
              is_private ? "dst" : "tg",
              (unsigned)(dst_id[0]<<16|dst_id[1]<<8|dst_id[2]), log_hex(hbp_stream, 4));
-        for (int i = 0; i < LATE_ENTRY_HEADS; i++) emit_head(tr, ts, lc);
+        start_heads(tr, ts);
     }
     int cur_pos;
     if (frame_type == HBPF_FRAMETYPE_VOICESYNC) cur_pos = 0;

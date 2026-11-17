@@ -187,9 +187,9 @@ int main(void)
     uint8_t frame[DMRD_LEN];
     build_dmrd_head(frame, 0, call_lc);
     udp_sendto(fake_fd, frame, DMRD_LEN, cfg.hbp_bind_ip, cfg.hbp_bind_port);
-    pump(loop);
+    pump_for(loop, 0.2);   /* the call's 3 headers, 60 ms apart */
     checks++;
-    if (ngv != 1) { fprintf(stderr, "FAIL: expected 1 relayed IPSC frame, got %d\n", ngv); fails++; }
+    if (ngv != 3) { fprintf(stderr, "FAIL: expected 3 relayed IPSC frames, got %d\n", ngv); fails++; }
     else {
         unsigned src = (unsigned)(gvcap[0][6]<<16 | gvcap[0][7]<<8 | gvcap[0][8]);
         unsigned dst = (unsigned)(gvcap[0][9]<<16 | gvcap[0][10]<<8 | gvcap[0][11]);
@@ -278,9 +278,9 @@ int main(void)
     ngv = 0;
     build_dmrd_head(frame, 0, call_lc);
     udp_sendto(fake_fd2, frame, DMRD_LEN, cfg2.hbp_bind_ip, cfg2.hbp_bind_port);
-    pump(loop2);
+    pump_for(loop2, 0.2);
     checks++;
-    if (ngv != 1) { fprintf(stderr, "FAIL: fallback mode expected 1 relayed IPSC frame, got %d\n", ngv); fails++; }
+    if (ngv != 3) { fprintf(stderr, "FAIL: fallback mode expected 3 relayed IPSC frames, got %d\n", ngv); fails++; }
 
     /* 12. After NO_HANDSHAKE_PING_INTERVAL (10s), the bare "DMRP" ping fires --
      * matches MMDVM-Host's CDMRNetwork::writePing() exactly. */

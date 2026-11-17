@@ -28,13 +28,15 @@
 #define MAXCAP 64
 static uint8_t gvcap[MAXCAP][128];
 static int     gvlen[MAXCAP];
+static double  gvtime[MAXCAP];
 static int     ngv = 0;
+static ev_loop *LOOP;
 
 int  ipsc_has_peers(struct ipsc *ip) { (void)ip; return 1; }
 uint32_t ipsc_sole_peer_id(struct ipsc *ip) { (void)ip; return 0; }
 void ipsc_send_voice(struct ipsc *ip, const uint8_t *p, int n) {
     (void)ip;
-    if (ngv < MAXCAP) { memcpy(gvcap[ngv], p, (size_t)n); gvlen[ngv] = n; ngv++; }
+    if (ngv < MAXCAP) { memcpy(gvcap[ngv], p, (size_t)n); gvlen[ngv] = n; gvtime[ngv] = ev_now(LOOP); ngv++; }
 }
 int  hbp_is_connected(struct hbp *hb) { (void)hb; return 1; }
 void hbp_activate(struct hbp *hb) { (void)hb; }
@@ -218,6 +220,33 @@ static int rtp_like_motorola(const char *what)
     return fails;
 }
 
+/* The call's headers 60 ms apart, its first voice burst no sooner than 60 ms after the last. */
+static int headers_on_slot_grid(const char *what)
+{
+    int fails = 0, nh = 0;
+    for (int i = 1; i < ngv; i++) {
+        if (gvcap[i - 1][GV_BURST_TYPE_OFF] != VOICE_HEAD) continue;
+        nh++;
+        double gap = gvtime[i] - gvtime[i - 1];
+        int to_head = gvcap[i][GV_BURST_TYPE_OFF] == VOICE_HEAD;
+        if (gap < 0.055 || (to_head && gap > 0.065)) {
+            fprintf(stderr, "FAIL: %s: packet %d (type 0x%02x) %.0f ms after header %d, want 60\n",
+                    what, i, gvcap[i][GV_BURST_TYPE_OFF], gap * 1000, nh);
+            fails++;
+        }
+    }
+    return fails;
+}
+
+/* b0 of the first AMBE frame in a 19-byte IPSC voice payload (bits 0-5 and 48). */
+static int ambe_b0(const uint8_t *ambe19)
+{
+    dmr_bit b[152]; dmr_bytes_to_bits(ambe19, 19, b);
+    int b0 = 0;
+    for (int i = 0; i < 6; i++) b0 = b0 << 1 | b[i];
+    return b0 << 1 | b[48];
+}
+
 static int check_lc(const char *what, const uint8_t got[9], const uint8_t want[9])
 {
     if (memcmp(got, want, 9) == 0) return 0;
@@ -236,6 +265,7 @@ int main(void)
         fprintf(stderr, "config: %s\n", err); return 2;
     }
     ev_loop *loop = ev_new();
+    LOOP = loop;
     TR = translator_new(&cfg, loop);
     translator_set_protocols(TR, (struct ipsc *)1, (struct hbp *)1);
 
@@ -352,8 +382,8 @@ int main(void)
         }
     }
     call_checks++;
-    if (voice != 6 || ts2_heads != 2) {
-        fprintf(stderr, "FAIL: 53-byte DMRD call: %d voice bursts and %d head/term delivered, want 6 and 2\n", voice, ts2_heads);
+    if (voice != 6 || ts2_heads != 4) {
+        fprintf(stderr, "FAIL: 53-byte DMRD call: %d voice bursts and %d head/term delivered, want 6 and 4\n", voice, ts2_heads);
         call_fails++;
     }
     printf("HBP->IPSC call frames: %d checks, %d failures\n", call_checks, call_fails);
@@ -366,7 +396,7 @@ int main(void)
     play_call(loop, call_lc, 1, 0, 4, 2, 1.0);
     count_calls(&heads, &terms, &hv, &one);
     gap_checks++;
-    if (heads != 1 || terms != 1 || !one) {
+    if (heads != 3 || terms != 1 || !one) {
         fprintf(stderr, "FAIL: a 1 s gap cut the call: %d VOICE_HEAD, %d VOICE_TERM, %s stream id\n",
                 heads, terms, one ? "one" : "more than one");
         gap_fails++;
@@ -392,8 +422,8 @@ int main(void)
     play_call(loop, call_lc, 1, 0, 4, 2, 2.0);
     count_calls(&heads, &terms, &hv, &one);
     gap_checks++;
-    if (heads != 4 || hv != 2 || terms != 2) {
-        fprintf(stderr, "FAIL: a 2 s gap: %d VOICE_HEAD (%d before voice), %d VOICE_TERM, want 4, 2, 2\n",
+    if (heads != 6 || hv != 2 || terms != 2) {
+        fprintf(stderr, "FAIL: a 2 s gap: %d VOICE_HEAD (%d before voice), %d VOICE_TERM, want 6, 2, 2\n",
                 heads, hv, terms);
         gap_fails++;
     }
@@ -401,7 +431,7 @@ int main(void)
     play_split(loop, call_lc, call_lc);
     count_calls(&heads, &terms, &hv, &one);
     gap_checks++;
-    if (heads != 1 || terms != 1 || !one) {
+    if (heads != 3 || terms != 1 || !one) {
         fprintf(stderr, "FAIL: a call split into two streams: %d VOICE_HEAD, %d VOICE_TERM, %s IPSC call\n",
                 heads, terms, one ? "one" : "more than one");
         gap_fails++;
@@ -410,31 +440,50 @@ int main(void)
     play_split(loop, call_lc, other_lc);
     count_calls(&heads, &terms, &hv, &one);
     gap_checks++;
-    if (heads != 4 || one) {
-        fprintf(stderr, "FAIL: another caller on a new stream: %d VOICE_HEAD, %s IPSC call, want 4 and two\n",
+    if (heads != 6 || one) {
+        fprintf(stderr, "FAIL: another caller on a new stream: %d VOICE_HEAD, %s IPSC call, want 6 and two\n",
                 heads, one ? "one" : "more than one");
         gap_fails++;
     }
     printf("HBP->IPSC network gaps: %d checks, %d failures\n", gap_checks, gap_fails);
 
-    /* Header repeats: a call bridged from another repeater reaches the master with two headers,
-     * and a call joined midway gets three. */
+    /* Headers as the old DMRlink stack sends them: three per call, one slot apart, voice a slot
+     * after the last, however many headers the network sent and however close together (a call
+     * bridged from another repeater reaches the master with two, 50 ms apart). */
     int rtp_fails = 0, rtp_checks = 0;
     play_call(loop, call_lc, 2, 0, 3, -1, 0.0);
     count_calls(&heads, &terms, &hv, &one);
     rtp_checks++;
-    if (heads != 2 || terms != 1) {
-        fprintf(stderr, "FAIL: a call with two headers: %d VOICE_HEAD, %d VOICE_TERM, want 2 and 1\n", heads, terms);
+    if (heads != 3 || terms != 1) {
+        fprintf(stderr, "FAIL: a call with two headers: %d VOICE_HEAD, %d VOICE_TERM, want 3 and 1\n", heads, terms);
         rtp_fails++;
     }
+    rtp_checks++;
+    rtp_fails += headers_on_slot_grid("a call with two headers") != 0;
     rtp_checks++;
     rtp_fails += rtp_like_motorola("a call with two headers") != 0;
     play_call(loop, call_lc, 0, 2, 2, -1, 0.0);
     rtp_checks++;
+    rtp_fails += headers_on_slot_grid("a call joined midway") != 0;
+    rtp_checks++;
     rtp_fails += rtp_like_motorola("a call joined midway") != 0;
     play_call(loop, call_lc, 1, 0, 2, -1, 0.0);
     rtp_checks++;
+    rtp_fails += headers_on_slot_grid("a call with one header") != 0;
+    rtp_checks++;
     rtp_fails += rtp_like_motorola("a call with one header") != 0;
+
+    /* A network gap is filled with AMBE silence (b0 124-125), never an erasure (b0 120-123). */
+    play_call(loop, call_lc, 1, 0, 4, 2, 1.0);
+    rtp_checks++;
+    int erasures = 0;
+    for (int i = 0; i < ngv; i++)
+        if (gvcap[i][GV_BURST_TYPE_OFF] == SLOT1_VOICE && ambe_b0(gvcap[i] + 33) >= 120 && ambe_b0(gvcap[i] + 33) <= 123)
+            erasures++;
+    if (erasures) {
+        fprintf(stderr, "FAIL: a 1 s gap filled with %d AMBE erasure bursts\n", erasures);
+        rtp_fails++;
+    }
     printf("HBP->IPSC header RTP: %d checks, %d failures\n", rtp_checks, rtp_fails);
 
     translator_free(TR); ev_free(loop);
