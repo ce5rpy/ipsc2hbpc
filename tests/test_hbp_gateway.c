@@ -46,8 +46,6 @@ static const uint8_t STREAM_ID[4] = { 0x42, 0x7d, 0x91, 0x7f };
 
 static void put_bits_at(dmr_bit *fb, int off, const dmr_bit *src, int n) { memcpy(fb + off, src, (size_t)n); }
 
-/* VOICE_HEAD DMRD frame — the header alone makes translator_hbp_voice_received()
- * emit an IPSC frame immediately (see translate.c: "Forward the header immediately"). */
 static int build_dmrd_head(uint8_t *out, int seq, const uint8_t lc[9])
 {
     memset(out, 0, DMRD_LEN);
@@ -69,6 +67,17 @@ static int build_dmrd_head(uint8_t *out, int seq, const uint8_t lc[9])
     put_bits_at(fb, 166, full_lc + 98, 98);
     dmr_bits_to_bytes(fb, 264, out + DMRD_PAYLOAD_OFF);
     return DMRD_LEN;
+}
+
+/* A header, one burst A and a terminator: a call's headers go out with its first voice burst. */
+static void send_call(int fd, const Config *cfg, uint8_t frame[DMRD_LEN], const uint8_t lc[9])
+{
+    build_dmrd_head(frame, 0, lc);
+    udp_sendto(fd, frame, DMRD_LEN, cfg->hbp_bind_ip, cfg->hbp_bind_port);
+    frame[DMRD_SEQ_OFF] = 1; frame[DMRD_FLAGS_OFF] = HBPF_FRAMETYPE_VOICESYNC;
+    udp_sendto(fd, frame, DMRD_LEN, cfg->hbp_bind_ip, cfg->hbp_bind_port);
+    frame[DMRD_SEQ_OFF] = 2; frame[DMRD_FLAGS_OFF] = HBPF_FRAMETYPE_DATASYNC | HBPF_SLT_VTERM;
+    udp_sendto(fd, frame, DMRD_LEN, cfg->hbp_bind_ip, cfg->hbp_bind_port);
 }
 
 static void stop_cb(ev_loop *loop, void *ud) { (void)ud; ev_stop(loop); }
@@ -185,11 +194,10 @@ int main(void)
     call_lc[3]=(TEST_DST>>16)&0xFF; call_lc[4]=(TEST_DST>>8)&0xFF; call_lc[5]=TEST_DST&0xFF;
     call_lc[6]=(TEST_SRC>>16)&0xFF; call_lc[7]=(TEST_SRC>>8)&0xFF; call_lc[8]=TEST_SRC&0xFF;
     uint8_t frame[DMRD_LEN];
-    build_dmrd_head(frame, 0, call_lc);
-    udp_sendto(fake_fd, frame, DMRD_LEN, cfg.hbp_bind_ip, cfg.hbp_bind_port);
-    pump_for(loop, 0.2);   /* the call's 3 headers, 60 ms apart */
+    send_call(fake_fd, &cfg, frame, call_lc);
+    pump_for(loop, 0.4);
     checks++;
-    if (ngv != 3) { fprintf(stderr, "FAIL: expected 3 relayed IPSC frames, got %d\n", ngv); fails++; }
+    if (ngv != 5) { fprintf(stderr, "FAIL: expected 3 headers, a voice burst and a terminator, got %d IPSC frames\n", ngv); fails++; }
     else {
         unsigned src = (unsigned)(gvcap[0][6]<<16 | gvcap[0][7]<<8 | gvcap[0][8]);
         unsigned dst = (unsigned)(gvcap[0][9]<<16 | gvcap[0][10]<<8 | gvcap[0][11]);
@@ -276,11 +284,10 @@ int main(void)
 
     /* 11. DMRD relay works right away once fallen back, no handshake needed. */
     ngv = 0;
-    build_dmrd_head(frame, 0, call_lc);
-    udp_sendto(fake_fd2, frame, DMRD_LEN, cfg2.hbp_bind_ip, cfg2.hbp_bind_port);
-    pump_for(loop2, 0.2);
+    send_call(fake_fd2, &cfg2, frame, call_lc);
+    pump_for(loop2, 0.4);
     checks++;
-    if (ngv != 3) { fprintf(stderr, "FAIL: fallback mode expected 3 relayed IPSC frames, got %d\n", ngv); fails++; }
+    if (ngv != 5) { fprintf(stderr, "FAIL: fallback mode expected 5 relayed IPSC frames, got %d\n", ngv); fails++; }
 
     /* 12. After NO_HANDSHAKE_PING_INTERVAL (10s), the bare "DMRP" ping fires --
      * matches MMDVM-Host's CDMRNetwork::writePing() exactly. */

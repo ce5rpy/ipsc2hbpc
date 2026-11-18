@@ -287,6 +287,8 @@ int main(void)
         uint8_t raw[128]; int n = unhex(dmrd_hex, raw);
         while (n < 55) raw[n++] = 0;
         translator_hbp_voice_received(tr, raw, 55);
+        raw[15] = 0x62;   /* CALL_P|DATASYNC|VTERM: a header goes out with voice or with its terminator */
+        translator_hbp_voice_received(tr, raw, 55);
         if (ngv < 1) {
             fprintf(stderr, "FAIL private HBP→IPSC: no voice frame emitted\n");
             pvt_fails++;

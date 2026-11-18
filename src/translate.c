@@ -84,7 +84,6 @@ struct translator {
     ev_timer *in_delivery_timer[3];
     ev_timer *in_head_timer[3];
     int      in_heads_left[3];
-    double   in_heads_end[3];         /* when the last of the call's headers goes out */
 
     /* Talker Alias relay (HBP -> IPSC): the current superframe's embedded-LC
      * fragments (bursts B,C,D,E) as they arrive; one that reassembles on burst
@@ -315,7 +314,6 @@ static void cancel_head_timer(translator *tr, int ts)
 {
     if (tr->in_head_timer[ts]) { ev_timer_cancel(tr->loop, tr->in_head_timer[ts]); tr->in_head_timer[ts] = NULL; }
     tr->in_heads_left[ts] = 0;
-    tr->in_heads_end[ts] = 0.0;
 }
 
 static void init_call_state(translator *tr)
@@ -698,17 +696,21 @@ static int clock_idle(translator *tr, int ts)
     return tr->in_delivery_timer[ts] == NULL && tr->in_next_slot_time[ts] == 0.0;
 }
 
+static void start_heads(translator *tr, int ts, double at);
+
 /* Anchor the delivery clock to the FIRST voice burst, with jitter_buffer_depth
- * slots of lead.  The header→voice gap on the HBP wire (~175 ms) is wider than
- * the buffer, so the clock is deliberately NOT anchored to the header — doing so
- * would consume all the lead before voice arrives and starve the buffer. */
+ * slots of lead, and the call's headers to the slots right before it.  The
+ * header→voice gap on the HBP wire varies (60-380 ms seen from one hotspot); a
+ * repeater given headers and then nothing for that long keeps its radios mute. */
 static void arm_clock_from_voice(translator *tr, int ts, int first_pos)
 {
     if (clock_idle(tr, ts)) {
         tr->in_burst_pos[ts] = first_pos;
         tr->in_consec_synth[ts] = 0;
-        double first = ev_now(tr->loop) + tr->cfg->jitter_buffer_depth * SLOT_MS;
-        if (first < tr->in_heads_end[ts] + SLOT_MS) first = tr->in_heads_end[ts] + SLOT_MS;
+        double now = ev_now(tr->loop);
+        double first = now + tr->cfg->jitter_buffer_depth * SLOT_MS;
+        if (first < now + CALL_HEADS * SLOT_MS) first = now + CALL_HEADS * SLOT_MS;
+        start_heads(tr, ts, first - CALL_HEADS * SLOT_MS);
         tr->in_next_slot_time[ts] = first;
         arm_delivery(tr, ts);
     }
@@ -775,14 +777,14 @@ static void head_timer_cb(ev_loop *loop, void *ud)
         tr->in_head_timer[ts] = ev_timer_after(tr->loop, SLOT_MS, head_timer_cb, &tr->deliv[ts]);
 }
 
-/* The call's own CALL_HEADS headers on the slot grid; header repeats from the network are
- * not relayed, as their spacing is whatever the path upstream made of it. */
-static void start_heads(translator *tr, int ts)
+/* The call's own CALL_HEADS headers on the slot grid from `at`; header repeats from the
+ * network are not relayed, as their spacing is whatever the path upstream made of it. */
+static void start_heads(translator *tr, int ts, double at)
 {
-    emit_head(tr, ts, tr->in_lc[ts]);
-    tr->in_heads_left[ts] = CALL_HEADS - 1;
-    tr->in_heads_end[ts] = ev_now(tr->loop) + (CALL_HEADS - 1) * SLOT_MS;
-    tr->in_head_timer[ts] = ev_timer_after(tr->loop, SLOT_MS, head_timer_cb, &tr->deliv[ts]);
+    tr->in_heads_left[ts] = CALL_HEADS;
+    double now = ev_now(tr->loop);
+    if (at <= now) head_timer_cb(tr->loop, &tr->deliv[ts]);
+    else tr->in_head_timer[ts] = ev_timer_after(tr->loop, at - now, head_timer_cb, &tr->deliv[ts]);
 }
 
 static void emit_term(translator *tr, int ts)
@@ -874,9 +876,7 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
             is_private = 1;
         if (!(tr->in_has_hbp_stream[ts] && memcmp(hbp_stream, tr->in_hbp_stream[ts], 4) == 0)) {
             /* New call — clear leftover delivery state and assign a fresh stream
-             * ID.  Do NOT arm the delivery clock here: the header->voice gap on the
-             * HBP wire (~175 ms) is wider than the buffer, so the clock is armed
-             * from the first VOICE burst instead. */
+             * ID.  Its headers go out with the clock, from the first VOICE burst. */
             clear_in_call(tr, ts);
             tr->in_rtp_seq[ts] = 0; tr->in_rtp_ts[ts] = 0;
             memcpy(tr->in_hbp_stream[ts], hbp_stream, 4); tr->in_has_hbp_stream[ts]=1;
@@ -895,7 +895,6 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
         }
         memcpy(tr->in_lc[ts], lc, 9); tr->in_has_lc[ts]=1;
         dmr_encode_emblc(lc, tr->in_emb[ts]); tr->in_has_emb[ts]=1;
-        start_heads(tr, ts);
         return;
     }
 
@@ -913,7 +912,9 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
         /* Mark pending so the call tail isn't clipped. */
         tr->in_term_pending[ts] = 1;
         if (clock_idle(tr, ts)) {
-            /* No buffered voice tail to drain — emit the terminator now. */
+            /* No buffered voice tail to drain — emit the terminator now, behind its
+             * header if no voice ever started the call's headers. */
+            if (!tr->in_rtp_seq[ts]) emit_head(tr, ts, tr->in_lc[ts]);
             emit_term(tr, ts);
         }
         /* else: the running delivery clock emits TERM after the tail drains. */
@@ -951,7 +952,6 @@ void translator_hbp_voice_received(translator *tr, const uint8_t *dmrd, int len)
              ts, (unsigned)(src_sub[0]<<16|src_sub[1]<<8|src_sub[2]),
              is_private ? "dst" : "tg",
              (unsigned)(dst_id[0]<<16|dst_id[1]<<8|dst_id[2]), log_hex(hbp_stream, 4));
-        start_heads(tr, ts);
     }
     int cur_pos;
     if (frame_type == HBPF_FRAMETYPE_VOICESYNC) cur_pos = 0;
