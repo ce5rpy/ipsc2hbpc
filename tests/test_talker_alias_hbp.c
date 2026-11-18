@@ -220,7 +220,7 @@ static int rtp_like_motorola(const char *what)
     return fails;
 }
 
-/* The call's headers 60 ms apart, its first voice burst no sooner than 60 ms after the last. */
+/* The call's headers 60 ms apart, its first voice burst 60 ms after the last. */
 static int headers_on_slot_grid(const char *what)
 {
     int fails = 0, nh = 0;
@@ -228,8 +228,7 @@ static int headers_on_slot_grid(const char *what)
         if (gvcap[i - 1][GV_BURST_TYPE_OFF] != VOICE_HEAD) continue;
         nh++;
         double gap = gvtime[i] - gvtime[i - 1];
-        int to_head = gvcap[i][GV_BURST_TYPE_OFF] == VOICE_HEAD;
-        if (gap < 0.055 || (to_head && gap > 0.065)) {
+        if (gap < 0.055 || gap > 0.065) {
             fprintf(stderr, "FAIL: %s: packet %d (type 0x%02x) %.0f ms after header %d, want 60\n",
                     what, i, gvcap[i][GV_BURST_TYPE_OFF], gap * 1000, nh);
             fails++;
@@ -472,6 +471,19 @@ int main(void)
     rtp_fails += headers_on_slot_grid("a call with one header") != 0;
     rtp_checks++;
     rtp_fails += rtp_like_motorola("a call with one header") != 0;
+    /* A hotspot's voice reached the master up to 380 ms after its header. */
+    play_call(loop, call_lc, 1, 0, 2, 0, 0.32);
+    count_calls(&heads, &terms, &hv, &one);
+    rtp_checks++;
+    if (heads != 3) { fprintf(stderr, "FAIL: voice 380 ms after the header: %d VOICE_HEAD, want 3\n", heads); rtp_fails++; }
+    rtp_checks++;
+    rtp_fails += headers_on_slot_grid("voice 380 ms after the header") != 0;
+    int depth = cfg.jitter_buffer_depth;
+    cfg.jitter_buffer_depth = 5;
+    play_call(loop, call_lc, 1, 0, 2, -1, 0.0);
+    rtp_checks++;
+    rtp_fails += headers_on_slot_grid("a 5-slot jitter buffer") != 0;
+    cfg.jitter_buffer_depth = depth;
 
     /* A network gap is filled with AMBE silence (b0 124-125), never an erasure (b0 120-123). */
     play_call(loop, call_lc, 1, 0, 4, 2, 1.0);
